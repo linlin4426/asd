@@ -28,11 +28,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "spp_handler.h"
 #include "i3c_debug_handler.h"
 // clang-format off
+#include <dirent.h>
 #include <fcntl.h>
+#include <regex.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
 // clang-format on
@@ -79,6 +82,7 @@ SPP_Handler* SPPHandler(bus_config* config)
         state->spp_device_count = 0;
         state->device_index = 0;
         state->config = config;
+        state->broadcast_filepath[0] = '\0';
     }
 
     return state;
@@ -93,6 +97,14 @@ STATUS spp_initialize(SPP_Handler* state)
         if (status == ST_OK)
         {
             state->ibi_handled = false;
+            if (spp_get_broadcast_action_filepath(
+                    state->broadcast_filepath,
+                    sizeof(state->broadcast_filepath)) != ST_OK)
+            {
+                ASD_log(ASD_LogLevel_Error, stream, option,
+                        "Broadcast action filepath not found");
+                state->broadcast_filepath[0] = '\0';
+            }
         }
     }
     return status;
@@ -290,12 +302,17 @@ STATUS spp_send_cmd(SPP_Handler* state, spp_command_t cmd, uint16_t size,
     }
     else if (cmd == BroadcastDebugAction )
     {
-        const char *filepath = BROADCASTACTIONFILE;
         char dbg_byte[5]={0};
         ssize_t write_len;
         int broadcast_fd;
+        if (state->broadcast_filepath[0] == '\0')
+        {
+            ASD_log(ASD_LogLevel_Error, stream, option,
+                    "Broadcast action filepath was not discovered during init");
+            return ST_ERR;
+        }
         sprintf(dbg_byte, "%x", write_buffer[0]);
-        broadcast_fd = open(filepath, O_WRONLY);
+        broadcast_fd = open(state->broadcast_filepath, O_WRONLY);
         if (broadcast_fd == -1)
         {
             ASD_log(ASD_LogLevel_Error,stream, option,
@@ -311,7 +328,8 @@ STATUS spp_send_cmd(SPP_Handler* state, spp_command_t cmd, uint16_t size,
         {
              ASD_log(ASD_LogLevel_Error,stream, option,
                     "Error %s when writing to file %s with payload 0x%x\n",
-                    strerror(errno), filepath, write_buffer[0]);
+                    strerror(errno), state->broadcast_filepath,
+                    write_buffer[0]);
             if (close(broadcast_fd) == -1)
             {
                 ASD_log(ASD_LogLevel_Error,stream, option,
@@ -707,4 +725,64 @@ bool check_spp_auto_cmd_event(ASD_EVENT event, ASD_EVENT_DATA event_data)
         }
     }
     return false;
+}
+
+STATUS spp_get_broadcast_action_filepath(char* filepath, size_t filepath_size)
+{
+    DIR* d;
+    struct dirent* dir;
+    regex_t bus_regex;
+    int ret;
+    STATUS status = ST_ERR;
+
+    if (filepath == NULL || filepath_size == 0)
+    {
+        ASD_log(ASD_LogLevel_Error, stream, option,
+                "Invalid parameters for broadcast action filepath");
+        return ST_ERR;
+    }
+
+    ret = regcomp(&bus_regex, "^i3c-[0-9]+$", REG_EXTENDED);
+    if (ret != 0)
+    {
+        ASD_log(ASD_LogLevel_Error, stream, option,
+                "Failed to compile i3c bus regex");
+        return ST_ERR;
+    }
+
+    d = opendir(SPP_BROADCAST_DEVICE_PATH);
+    if (d == NULL)
+    {
+        ASD_log(ASD_LogLevel_Error, stream, option,
+                "Failed to open platform device directory: %s",
+                SPP_BROADCAST_DEVICE_PATH);
+        regfree(&bus_regex);
+        return ST_ERR;
+    }
+
+    while ((dir = readdir(d)) != NULL)
+    {
+        ret = regexec(&bus_regex, dir->d_name, 0, NULL, 0);
+        if (ret == 0)
+        {
+            snprintf(filepath, filepath_size,
+                     "/sys/bus/i3c/devices/%s/%s",
+                     dir->d_name, BROADCAST_ACTION_FILENAME);
+            ASD_log(ASD_LogLevel_Info, stream, option,
+                    "Discovered broadcast action file: %s", filepath);
+            status = ST_OK;
+            break;
+        }
+    }
+
+    closedir(d);
+    regfree(&bus_regex);
+
+    if (status != ST_OK)
+    {
+        ASD_log(ASD_LogLevel_Error, stream, option,
+                "No i3c bus found under %s", SPP_BROADCAST_DEVICE_PATH);
+    }
+
+    return status;
 }

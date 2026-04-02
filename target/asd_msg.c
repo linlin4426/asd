@@ -2552,14 +2552,66 @@ STATUS determine_shift_end_state(ScanType scan_type,
                             *end_state = (enum jtag_states)(*next_cmd2_ptr &
                                                             TAP_STATE_MASK);
 #ifdef ENABLE_DEBUG_LOGGING
-                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_SDK,
+                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_JTAG,
                                     ASD_LogOption_None,
-                                    "Staying in state: 0x%02x", *end_state);
+                                    "Staying in PAU state: (%d)", *end_state);
 #endif
                         }
                         else if ((*next_cmd2_ptr & TAP_STATE_MASK) == jtag_rti)
                         {
                             *end_state = jtag_rti;
+#ifdef ENABLE_DEBUG_LOGGING
+                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_JTAG,
+                                    ASD_LogOption_None,
+                                    "After Shift, go to RTI: (%d)",
+                                    *end_state);
+#endif
+                        }
+                        else if (((*next_cmd_ptr & TAP_STATE_MASK)
+                                                    == jtag_ex1_dr) &&
+                                 ((*next_cmd2_ptr & TAP_STATE_MASK)
+                                                    == jtag_sel_dr))
+                        {
+                            *end_state = jtag_rti;
+#ifdef ENABLE_DEBUG_LOGGING
+                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_JTAG,
+                                    ASD_LogOption_None,
+                                    "After Shift, go to RTI (not SelDR): (%d)",
+                                    *end_state);
+#endif
+                        }
+                        else if (((*next_cmd_ptr & TAP_STATE_MASK)
+                                                   == jtag_ex1_ir) &&
+                                 ((*next_cmd2_ptr & TAP_STATE_MASK)
+                                                    == jtag_shf_dr))
+                        {
+#ifdef ENABLE_DEBUG_LOGGING
+                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_JTAG,
+                                    ASD_LogOption_None,
+                                    "After Shift, go to Exit1IR state: (%d)",
+                                    *end_state);
+#endif
+                        }
+                         else if (((*next_cmd_ptr & TAP_STATE_MASK)
+                                                    == jtag_ex1_dr) &&
+                                 ((*next_cmd2_ptr & TAP_STATE_MASK)
+                                                    == jtag_shf_ir))
+                        {
+#ifdef ENABLE_DEBUG_LOGGING
+                            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_JTAG,
+                                    ASD_LogOption_None,
+                                    "After Shift, go to Exit1DR state: (%d)",
+                                    *end_state);
+#endif
+                        }
+                        else
+                        {
+#ifdef ENABLE_DEBUG_LOGGING
+                            ASD_log(ASD_LogLevel_Error, ASD_LogStream_JTAG,
+                                    ASD_LogOption_None,
+                                    "Unexpected end_state: (%d) going to: (%d)",
+                                    *next_cmd2_ptr, *end_state);
+#endif
                         }
                     }
                 }

@@ -26,10 +26,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include "debug-over-i3c.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <poll.h>
+#include <regex.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -43,6 +45,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define VERSION_MINOR 0
 
 #define FRAME_TOTAL_LIMIT 512
+
+#define SPP_PLATFORM_DEVICE_PATH "/sys/bus/platform/devices/1e7a6000.i3c4"
+#define BROADCAST_ACTION_FILENAME "dbgaction_broadcast"
+#define MAX_BROADCAST_PATH_LEN 320
 
 enum verbose_level
 {
@@ -141,6 +147,53 @@ static bool get_write_data(const char * const  optarg, uint8_t data[], size_t *l
     }
 }
 
+static bool discover_broadcast_path(char *out_path, size_t path_len)
+{
+    DIR *d;
+    struct dirent *dent;
+    regex_t bus_regex;
+    bool found = false;
+
+    if (regcomp(&bus_regex, "^i3c-[0-9]+$", REG_EXTENDED) != 0)
+    {
+        trace(verbose_error, "Failed to compile i3c bus regex\n");
+        return false;
+    }
+
+    d = opendir(SPP_PLATFORM_DEVICE_PATH);
+    if (d == NULL)
+    {
+        trace(verbose_error,
+              "Failed to open platform device directory: %s: %s\n",
+              SPP_PLATFORM_DEVICE_PATH, strerror(errno));
+        regfree(&bus_regex);
+        return false;
+    }
+
+    while ((dent = readdir(d)) != NULL)
+    {
+        if (regexec(&bus_regex, dent->d_name, 0, NULL, 0) == 0)
+        {
+            snprintf(out_path, path_len,
+                     "/sys/bus/i3c/devices/%s/%s",
+                     dent->d_name, BROADCAST_ACTION_FILENAME);
+            trace(verbose_info,
+                  "Discovered broadcast action file: %s\n", out_path);
+            found = true;
+            break;
+        }
+    }
+    closedir(d);
+    regfree(&bus_regex);
+
+    if (!found)
+    {
+        trace(verbose_error,
+              "No i3c bus found under %s\n", SPP_PLATFORM_DEVICE_PATH);
+    }
+    return found;
+}
+
 int main(int argc, char* argv[])
 {
     uint8_t write_buffer[FRAME_TOTAL_LIMIT] = {0};
@@ -222,10 +275,16 @@ int main(int argc, char* argv[])
     if (do_broadcast)
     {
         ssize_t write_ret;
-        /*the i3c-3 might change in future platforms and will need to get updated.*/
-        const char *filepath = "/sys/bus/i3c/devices/i3c-3/dbgaction_broadcast";
+        char filepath[MAX_BROADCAST_PATH_LEN];
         char dbg_byte[5]={0};
-        int fd = open(filepath, O_WRONLY );
+        int fd;
+
+        if (!discover_broadcast_path(filepath, sizeof(filepath)))
+        {
+            return -1;
+        }
+
+        fd = open(filepath, O_WRONLY);
         if (fd == -1) {
             trace(verbose_error, "Error opening file %s: %s\n", filepath, strerror(errno));
             return -1;

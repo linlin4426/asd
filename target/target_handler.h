@@ -172,6 +172,7 @@ struct Target_Control_Handle
     bool xdp_present;
     int spp_fd;
     SPP_Handler* spp_handler;
+    uint32_t chain_select_delay_us;
 };
 
 typedef struct data_json_map
@@ -206,4 +207,5 @@ STATUS on_power2_event(Target_Control_Handle* state, ASD_EVENT* event);
 STATUS on_power3_event(Target_Control_Handle* state, ASD_EVENT* event);
 STATUS initialize_powergood_pin_handler(Target_Control_Handle* state);
 STATUS target_get_i2c_i3c_config(bus_options* busopt);
+void target_chain_select_delay(Target_Control_Handle* state);
 #endif // _TARGET_CONTROL_HANDLER_H_

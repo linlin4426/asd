@@ -37,7 +37,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/stat.h>
 
 #include "../gpio.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 int FAKE_FD[10];
@@ -105,7 +105,7 @@ void gpio_export_already_exported_test(void** state)
     int expected_fd = 88;
 
     expect_string(__wrap_open, pathname, "/sys/class/gpio/gpio87/value");
-    expect_value(__wrap_open, flags, O_WRONLY);
+    expect_value(__wrap_open, flags, O_RDWR);
     expect_any(__wrap_open, mode);
     FAKE_FD[0] = expected_fd;
     FAKE_FD_INDEX = 0;
@@ -121,7 +121,7 @@ void gpio_export_open_fail_test(void** state)
     int actual_fd = -1;
 
     expect_string(__wrap_open, pathname, "/sys/class/gpio/gpio87/value");
-    expect_value(__wrap_open, flags, O_WRONLY);
+    expect_value(__wrap_open, flags, O_RDWR);
     expect_any(__wrap_open, mode);
     FAKE_FD[0] = -1;
 
@@ -144,7 +144,7 @@ void gpio_export_fail_test(void** state)
     int actual_fd = -1;
 
     expect_string(__wrap_open, pathname, "/sys/class/gpio/gpio66/value");
-    expect_value(__wrap_open, flags, O_WRONLY);
+    expect_value(__wrap_open, flags, O_RDWR);
     expect_any(__wrap_open, mode);
     FAKE_FD[0] = -1;
 
@@ -174,7 +174,7 @@ void gpio_export_failed_to_get_fd_after_export_test(void** state)
     int actual_fd;
 
     expect_string(__wrap_open, pathname, "/sys/class/gpio/gpio66/value");
-    expect_value(__wrap_open, flags, O_WRONLY);
+    expect_value(__wrap_open, flags, O_RDWR);
     expect_any(__wrap_open, mode);
     FAKE_FD[0] = -1;
 
@@ -209,7 +209,7 @@ void gpio_export_success_test(void** state)
     int actual_fd;
 
     expect_string(__wrap_open, pathname, "/sys/class/gpio/gpio66/value");
-    expect_value(__wrap_open, flags, O_WRONLY);
+    expect_value(__wrap_open, flags, O_RDWR);
     expect_any(__wrap_open, mode);
     FAKE_FD[0] = -1;
 

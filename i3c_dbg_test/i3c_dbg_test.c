@@ -105,6 +105,13 @@ STATUS i3c_dbg_test_main(int argc, char** argv)
                                 NULL, NULL);
     SPP_Handler* state = SPPHandler(&args.buscfg);
 
+    if (state == NULL)
+    {
+        ASD_log(ASD_LogLevel_Error, stream, option,
+                "i3c_dbg_test: SPPHandler allocation failed");
+        return ST_ERR;
+    }
+
     if(spp_initialize(state) == ST_OK)
     {
         uint8_t count = 0;

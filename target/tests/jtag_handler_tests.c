@@ -36,7 +36,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/ioctl.h>
 
 #include "../jtag_handler.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 #define TEST_BUFFER_SIZE 50
@@ -132,7 +132,8 @@ typedef enum
     IoctlArgType_controller_mode_param,
     IoctlArgType_tap_state_param,
     IoctlArgType_set_tck_param,
-    IoctlArgType_tck_bitbang
+    IoctlArgType_tck_bitbang,
+    IoctlArgType_bitbang_packet
 } IoctlArgType;
 #define MAX_IOCTLS 15
 static IoctlArgType ioctl_arg_types[MAX_IOCTLS] = {IoctlArgType_UInt};
@@ -177,6 +178,11 @@ int __wrap_ioctl(int fd, unsigned long request, ...)
     {
         ioctl_arg_tck_bitbang = va_arg(args, struct tck_bitbang*);
         check_expected_ptr(ioctl_arg_tck_bitbang);
+    }
+    else if (ioctl_arg_types[index] == IoctlArgType_bitbang_packet)
+    {
+        struct bitbang_packet* bp = va_arg(args, struct bitbang_packet*);
+        check_expected_ptr(bp);
     }
     ioctl_arg_index++;
 
@@ -227,8 +233,8 @@ static int teardown(void** state)
 }
 
 int MEMCPY_SAFE_RESULT = 0;
-int __wrap_memcpy_safe(void* dest, size_t destsize, const void* src,
-                       size_t count)
+int __wrap__memcpy_s_chk(void* dest, size_t dmax, const void* src,
+                        size_t slen, size_t destbos, size_t srcbos)
 {
     return MEMCPY_SAFE_RESULT;
 }
@@ -558,13 +564,14 @@ void JTAG_set_tap_state_jtag_rti_wait_cycles_failed(void** state)
     expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 5);
     expect_any_count(__wrap_ioctl, ioctl_args, 5);
 #else
-    ioctl_arg_types[test_ioctl_index] = IoctlArgType_UInt;
-    expect_value_count(__wrap_ioctl, fd, handler->JTAG_driver_handle, 1);
-    expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 1);
-    expect_any_count(__wrap_ioctl, ioctl_args, 1);
+    // Non-legacy: JTAG_set_tap_state does not call wait_cycles
 #endif
+#ifdef JTAG_LEGACY_DRIVER
     FAKE_IOCTL_RESULT[test_ioctl_index] = -1; // fail on last one
     assert_int_equal(JTAG_set_tap_state(handler, expected_state), ST_ERR);
+#else
+    assert_int_equal(JTAG_set_tap_state(handler, expected_state), ST_OK);
+#endif
 }
 
 void JTAG_set_tap_state_jtag_rti_execute_five_wait_cycles(void** state)
@@ -580,15 +587,13 @@ void JTAG_set_tap_state_jtag_rti_execute_five_wait_cycles(void** state)
     expect_value(__wrap_ioctl, request, AST_JTAG_SET_TAPSTATE);
     expect_any(__wrap_ioctl, ioctl_arg_tap_state_param);
     // expectations for wait cycles
-    ioctl_arg_types[test_ioctl_index] = IoctlArgType_UInt;
+    ioctl_arg_types[test_ioctl_index] = IoctlArgType_bitbang_packet;
 #ifdef JTAG_LEGACY_DRIVER
     expect_value_count(__wrap_ioctl, fd, handler->JTAG_driver_handle, 5);
     expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 5);
     expect_any_count(__wrap_ioctl, ioctl_args, 5);
 #else
-    expect_value_count(__wrap_ioctl, fd, handler->JTAG_driver_handle, 1);
-    expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 1);
-    expect_any_count(__wrap_ioctl, ioctl_args, 1);
+    // Non-legacy: JTAG_set_tap_state does not call wait_cycles
 #endif
     assert_int_equal(JTAG_set_tap_state(handler, expected_state), ST_OK);
 }
@@ -606,15 +611,13 @@ void JTAG_set_tap_state_jtag_pau_dr_execute_five_wait_cycles(void** state)
     expect_value(__wrap_ioctl, request, AST_JTAG_SET_TAPSTATE);
     expect_any(__wrap_ioctl, ioctl_arg_tap_state_param);
     // expectations for wait cycles
-    ioctl_arg_types[test_ioctl_index] = IoctlArgType_UInt;
+    ioctl_arg_types[test_ioctl_index] = IoctlArgType_bitbang_packet;
 #ifdef JTAG_LEGACY_DRIVER
     expect_value_count(__wrap_ioctl, fd, handler->JTAG_driver_handle, 5);
     expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 5);
     expect_any_count(__wrap_ioctl, ioctl_args, 5);
 #else
-    expect_value_count(__wrap_ioctl, fd, handler->JTAG_driver_handle, 1);
-    expect_value_count(__wrap_ioctl, request, AST_JTAG_BITBANG, 1);
-    expect_any_count(__wrap_ioctl, ioctl_args, 1);
+    // Non-legacy: JTAG_set_tap_state does not call wait_cycles
 #endif
     assert_int_equal(JTAG_set_tap_state(handler, expected_state), ST_OK);
 }

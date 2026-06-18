@@ -82,7 +82,7 @@ STATUS asd_server_ioctl(void* input, void* output, unsigned int cmd)
 void asd_server_log(ASD_LogLevel level, ASD_LogStream stream,
                      ASD_LogOption options, const char* string)
 {
-    ASD_log(level, stream, options, string);
+    ASD_log(level, stream, options, "%s", string);
 }
 
 void asd_server_log_buffer(ASD_LogLevel level, ASD_LogStream stream,

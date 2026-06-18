@@ -40,7 +40,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <syslog.h>
 
 #include "../ext_network.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 STATUS FAKE_EXTTCP_INIT = ST_OK;
@@ -361,6 +361,7 @@ void extnet_open_external_socket_setsockopt_TCP_NODELAY_fail_test(void** state)
     expect_socket_create(expected_socket);
 
     expect_setsocketopt(TCP_NODELAY, -1, expected_socket, NULL);
+    expect_value(__wrap_close, fd, expected_socket);
 
     assert_int_equal(ST_ERR,
                      extnet_open_external_socket(&extnet, NULL, 5123, &sock));
@@ -376,6 +377,7 @@ void extnet_open_external_socket_setsockopt_SO_REUSEADDR_fail_test(void** state)
     expect_socket_create(expected_socket);
     expect_setsocketopt(TCP_NODELAY, 0, expected_socket, NULL);
     expect_setsocketopt(SO_REUSEADDR, -1, expected_socket, NULL);
+    expect_value(__wrap_close, fd, expected_socket);
 
     assert_int_equal(ST_ERR,
                      extnet_open_external_socket(&extnet, NULL, 5123, &sock));
@@ -394,6 +396,7 @@ void extnet_open_external_socket_setsockopt_SO_BINDTODEVICE_fail_test(
     expect_setsocketopt(TCP_NODELAY, 0, expected_socket, NULL);
     expect_setsocketopt(SO_REUSEADDR, 0, expected_socket, NULL);
     expect_setsocketopt(SO_BINDTODEVICE, -1, expected_socket, eth);
+    expect_value(__wrap_close, fd, expected_socket);
 
     assert_int_equal(ST_ERR,
                      extnet_open_external_socket(&extnet, eth, 5123, &sock));

@@ -178,7 +178,7 @@ static STATUS asd_target_process_pin_event(struct pollfd poll_fd)
 void asd_target_log(ASD_LogLevel level, ASD_LogStream stream,
                     ASD_LogOption options, const char* string)
 {
-    ASD_log(level, stream, options, string);
+    ASD_log(level, stream, options, "%s", string);
 }
 
 void asd_target_log_buffer(ASD_LogLevel level, ASD_LogStream stream,

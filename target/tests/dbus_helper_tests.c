@@ -32,12 +32,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <safe_mem_lib.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #include "../dbus_helper.h"
-#include "../logging.h"
-#include "../mem_helper.h"
+#include "logging.h"
 #include "cmocka.h"
 #define MAX_SDBUS_RET_VALUES 20
 
@@ -178,7 +178,7 @@ int __wrap_sd_bus_get_property(sd_bus* bus, const char* destination,
     return SD_BUS_GET_PROPERTY_RESULT;
 }
 
-bool callb = false;
+extern bool callb;
 Power_State* callb_ptr = NULL;
 Power_State callb_state = STATE_UNKNOWN;
 int SD_BUS_PROCESS_RESULT;
@@ -270,12 +270,14 @@ void expect_power_off()
 void expect_power_reset()
 {
     expect_any(__wrap_sd_bus_error_free, error);
+    expect_any(__wrap_sd_bus_message_unref, m);
     SD_BUS_MESSAGE_NEW_METHOD_RESULT = 0;
 }
 
 void expect_power_reboot()
 {
     expect_any(__wrap_sd_bus_error_free, error);
+    expect_any(__wrap_sd_bus_message_unref, m);
     SD_BUS_PROCESS_RESULT = 0;
     SD_BUS_MESSAGE_NEW_METHOD_RESULT = 0;
 }
@@ -283,12 +285,14 @@ void expect_power_reboot()
 void expect_power_reboot_failure1()
 {
     expect_any(__wrap_sd_bus_error_free, error);
+    expect_any(__wrap_sd_bus_message_unref, m);
     SD_BUS_MESSAGE_NEW_METHOD_RESULT = -1;
 }
 
 void expect_power_reboot_failure2()
 {
     expect_any(__wrap_sd_bus_error_free, error);
+    expect_any(__wrap_sd_bus_message_unref, m);
     SD_BUS_MESSAGE_NEW_METHOD_RESULT = -1;
 }
 
@@ -335,7 +339,6 @@ void dbus_initialize_fail_to_get_fd_test(void** state)
     expect_any(__wrap_sd_bus_open_system, bus);
     SD_BUS_GET_FD_RESULT = -2;
     expect_any(__wrap_sd_bus_get_fd, bus);
-    expect_any(__wrap_sd_bus_unref, bus); // for deinitialize
     assert_int_equal(ST_ERR, dbus_initialize(&handle));
 }
 
@@ -370,8 +373,6 @@ void dbus_initialize_fail_to_dbus_gethotstate(void** state)
     expect_any(__wrap_sd_bus_error_free, error);
     expect_any(__wrap_sd_bus_message_unref, m);
 
-    expect_any(__wrap_sd_bus_unref, bus);
-
     assert_int_equal(ST_ERR, dbus_initialize(&handle));
 }
 
@@ -390,8 +391,6 @@ void dbus_initialize_fail_to_sd_bus_add_match_test(void** state)
     expect_string(__wrap_sd_bus_add_match, match, MATCH_STRING_CHASSIS);
     expect_any(__wrap_sd_bus_add_match, callback);
     expect_any(__wrap_sd_bus_add_match, userdata);
-
-    expect_any(__wrap_sd_bus_unref, bus);
 
     assert_int_equal(ST_ERR, dbus_initialize(&handle));
 }
@@ -414,7 +413,7 @@ void dbus_dbus_gethotstate_on_state_unknown_success_test(void** state)
                   GET_POWER_STATE_PROPERTY_CHASSIS);
     expect_string(__wrap_sd_bus_get_property, type, "s");
 
-    memcpy_safe(FAKE_READ_VALUE, sizeof(FAKE_READ_VALUE),
+    memcpy_s(FAKE_READ_VALUE, sizeof(FAKE_READ_VALUE),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -444,7 +443,7 @@ void dbus_dbus_gethotstate_off_state_unknown_success_test(void** state)
                   GET_POWER_STATE_PROPERTY_CHASSIS);
     expect_string(__wrap_sd_bus_get_property, type, "s");
 
-    memcpy_safe(FAKE_READ_VALUE, sizeof(FAKE_READ_VALUE),
+    memcpy_s(FAKE_READ_VALUE, sizeof(FAKE_READ_VALUE),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -493,7 +492,7 @@ void dbus_deinitialize_success_test(void** state)
     int dummy;
     Dbus_Handle handle;
     handle.bus = (sd_bus*)&dummy;
-    expect_any(__wrap_sd_bus_unref, bus);
+    handle.fd = 0;
     assert_int_equal(ST_OK, dbus_deinitialize(&handle));
 }
 
@@ -537,6 +536,7 @@ void dbus_power_toggle_on_success_test(void** state)
     expect_power_on();
     expect_any(__wrap_sd_bus_error_free, error);
     expect_any(__wrap_sd_bus_message_unref, m);
+    expect_any(__wrap_sd_bus_message_unref, m);
 
     assert_int_equal(ST_OK, dbus_power_toggle(&handle));
 }
@@ -550,6 +550,7 @@ void dbus_power_toggle_off_success_test(void** state)
     expect_get_power_state(POWER_ON_PROPERTY_CHASSIS);
     expect_power_off();
     expect_any(__wrap_sd_bus_error_free, error);
+    expect_any(__wrap_sd_bus_message_unref, m);
     expect_any(__wrap_sd_bus_message_unref, m);
 
     assert_int_equal(ST_OK, dbus_power_toggle(&handle));
@@ -794,10 +795,10 @@ void match_callback_discard_non_get_power_messages_test(void** state)
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 SET_POWER_STATE_METHOD_CHASSIS,
                 sizeof(SET_POWER_STATE_METHOD_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -829,10 +830,10 @@ void match_callback_fail_to_sd_bus_message_enter_container_variant_test(
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -864,10 +865,10 @@ void match_callback_fail_to_sd_bus_read_variant_test(void** state)
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -901,10 +902,10 @@ void match_callback_fail_to_sd_bus_message_exit_container_test(void** state)
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -941,10 +942,10 @@ void match_callback_test_power_on(void** state)
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_ON_PROPERTY_CHASSIS,
                 sizeof(POWER_ON_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);
@@ -979,10 +980,10 @@ void match_callback_test_power_off(void** state)
     SD_BUS_MESSAGE_READ_CHUNK = true;
     memset(&FAKE_READ_VALUES[0], 0, sizeof(FAKE_READ_VALUES[0]));
     memset(&FAKE_READ_VALUES[1], 0, sizeof(FAKE_READ_VALUES[1]));
-    memcpy_safe(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
+    memcpy_s(&FAKE_READ_VALUES[0], sizeof(FAKE_READ_VALUES[0]),
                 GET_POWER_STATE_PROPERTY_CHASSIS,
                 sizeof(GET_POWER_STATE_PROPERTY_CHASSIS) - 1);
-    memcpy_safe(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
+    memcpy_s(&FAKE_READ_VALUES[1], sizeof(FAKE_READ_VALUES[1]),
                 POWER_OFF_PROPERTY_CHASSIS,
                 sizeof(POWER_OFF_PROPERTY_CHASSIS) - 1);
     expect_any(__wrap_sd_bus_message_read, m);

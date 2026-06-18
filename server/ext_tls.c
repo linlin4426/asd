@@ -530,7 +530,7 @@ int exttls_recv(extnet_conn_t* pconn, void* pv_buf, size_t sz_len,
         if ((n_read =
                  SSL_read((SSL*)pconn->p_hdlr_data, pv_buf, (int)sz_len)) <= 0)
         {
-            if (ST_OK !=
+            if (ST_OK ==
                 exttls_has_read_error_closed((SSL*)pconn->p_hdlr_data, n_read))
             {
                 n_read = 0;

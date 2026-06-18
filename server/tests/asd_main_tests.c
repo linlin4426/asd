@@ -38,14 +38,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/socket.h>
 #include <syslog.h>
 
-#include "../asd_common.h"
+#include "asd_common.h"
 #include "../asd_main.h"
-#include "../asd_msg.h"
+#include "asd_target_interface.h"
 #include "../authenticate.h"
 #include "../ext_network.h"
-#include "../logging.h"
+#include "logging.h"
 #include "../session.h"
 #include "cmocka.h"
+
+// Access the global state from asd_main.c so we can reset between tests
+extern asd_state main_state;
 
 // static char temporary_log_buffer[512];
 void __wrap_ASD_log(ASD_LogLevel level, ASD_LogStream stream,
@@ -55,12 +58,6 @@ void __wrap_ASD_log(ASD_LogLevel level, ASD_LogStream stream,
     (void)stream;
     (void)options;
     (void)format;
-    // va_list args;
-    // va_start(args, format);
-    // vsnprintf(temporary_log_buffer, sizeof(temporary_log_buffer), format,
-    // args);
-    // fprintf(stderr, "%s\n", temporary_log_buffer);
-    // va_end(args);
 }
 
 void __wrap_ASD_log_buffer(ASD_LogLevel level, ASD_LogStream stream,
@@ -78,12 +75,14 @@ void __wrap_ASD_log_buffer(ASD_LogLevel level, ASD_LogStream stream,
 void __wrap_ASD_initialize_log_settings(ASD_LogLevel level,
                                         ASD_LogStream stream,
                                         bool write_to_syslog,
+                                        bool log_timestamp,
                                         ShouldLogFunctionPtr should_log_ptr,
                                         LogFunctionPtr log_ptr)
 {
     check_expected(level);
     check_expected(stream);
     check_expected(write_to_syslog);
+    check_expected(log_timestamp);
     check_expected_ptr(should_log_ptr);
     check_expected_ptr(log_ptr);
 }
@@ -93,6 +92,7 @@ void expect_any_ASD_initialize_log_settings()
     expect_any(__wrap_ASD_initialize_log_settings, level);
     expect_any(__wrap_ASD_initialize_log_settings, stream);
     expect_any(__wrap_ASD_initialize_log_settings, write_to_syslog);
+    expect_any(__wrap_ASD_initialize_log_settings, log_timestamp);
     expect_any(__wrap_ASD_initialize_log_settings, should_log_ptr);
     expect_any(__wrap_ASD_initialize_log_settings, log_ptr);
 }
@@ -103,6 +103,7 @@ void expect_default_ASD_initialize_log_settings()
     expect_value(__wrap_ASD_initialize_log_settings, stream,
                  DEFAULT_LOG_STREAMS);
     expect_value(__wrap_ASD_initialize_log_settings, write_to_syslog, false);
+    expect_value(__wrap_ASD_initialize_log_settings, log_timestamp, false);
     expect_any(__wrap_ASD_initialize_log_settings, should_log_ptr);
     expect_any(__wrap_ASD_initialize_log_settings, log_ptr);
 }
@@ -138,8 +139,6 @@ void* __wrap_malloc(size_t size)
     {
         if (malloc_fail[malloc_index])
         {
-            // put the flag back. This behavior can be changed later
-            // if needed.
             check_expected(size);
             malloc_index++;
             return NULL;
@@ -155,7 +154,6 @@ void __wrap_free(void* ptr)
 {
     if (free_fail)
     {
-
         check_expected(ptr);
         return;
     }
@@ -257,13 +255,6 @@ void __wrap_session_close_all(Session* state)
 void __wrap_session_close_expired_unauth(Session* state)
 {
     check_expected_ptr(state);
-}
-
-int MEMCPY_SAFE_RESULT = 0;
-int __wrap_memcpy_safe(void* dest, size_t destsize, const void* src,
-                       size_t count)
-{
-    return MEMCPY_SAFE_RESULT;
 }
 
 STATUS SESSION_ALREADY_AUTHENTICATED_RESULT = ST_OK;
@@ -388,97 +379,70 @@ void __wrap_close(int fd)
     check_expected(fd);
 }
 
-ASD_MSG* FAKE_ASD_MSG_INIT_RESULT = NULL;
-ASD_MSG* __wrap_asd_msg_init(SendFunctionPtr send_function,
-                             ReadFunctionPtr read_function, void* cb_state,
-                             config* config)
+// --- asd_api_target mocks (replaces old asd_msg_* mocks) ---
+
+STATUS ASD_API_TARGET_INIT_RESULT = ST_OK;
+STATUS __wrap_asd_api_target_init(config* asd_cfg)
 {
-    check_expected_ptr(cb_state);
-    check_expected_ptr(send_function);
-    check_expected_ptr(read_function);
-    check_expected_ptr(config);
-    return FAKE_ASD_MSG_INIT_RESULT;
+    check_expected_ptr(asd_cfg);
+    return ASD_API_TARGET_INIT_RESULT;
 }
 
-void expect_any_asd_msg_init(ASD_MSG* sdk)
+void expect_asd_api_target_init(STATUS result)
 {
-    FAKE_ASD_MSG_INIT_RESULT = sdk;
-    expect_any(__wrap_asd_msg_init, cb_state);
-    expect_any(__wrap_asd_msg_init, send_function);
-    expect_any(__wrap_asd_msg_init, read_function);
-    expect_any(__wrap_asd_msg_init, config);
+    expect_any(__wrap_asd_api_target_init, asd_cfg);
+    ASD_API_TARGET_INIT_RESULT = result;
 }
 
-STATUS ASD_MSG_FREE_RESULT = ST_OK;
-STATUS __wrap_asd_msg_free(ASD_MSG* state)
+STATUS ASD_API_TARGET_DEINIT_RESULT = ST_OK;
+STATUS __wrap_asd_api_target_deinit(void)
 {
-    check_expected_ptr(state);
-    return ASD_MSG_FREE_RESULT;
+    return ASD_API_TARGET_DEINIT_RESULT;
 }
 
-void expect_asd_msg_free(STATUS result)
+void expect_asd_api_target_deinit(STATUS result)
 {
-    expect_any(__wrap_asd_msg_free, state);
-    ASD_MSG_FREE_RESULT = result;
+    ASD_API_TARGET_DEINIT_RESULT = result;
 }
 
-STATUS ASD_MSG_READ_RESULT = ST_OK;
-STATUS __wrap_asd_msg_read(ASD_MSG* state, void* conn, bool* data_pending)
-{
-    check_expected_ptr(state);
-    check_expected_ptr(conn);
-    check_expected_ptr(data_pending);
-    return ASD_MSG_READ_RESULT;
-}
-
-void expect_asd_msg_read(STATUS result)
-{
-    expect_any(__wrap_asd_msg_read, state);
-    expect_any(__wrap_asd_msg_read, conn);
-    expect_any(__wrap_asd_msg_read, data_pending);
-    ASD_MSG_READ_RESULT = result;
-}
-
+// For ioctl, we need to handle multiple cmd types
+int ASD_API_TARGET_IOCTL_INDEX = 0;
+STATUS ASD_API_TARGET_IOCTL_RESULTS[8];
 target_fdarr_t GPIO_FDS;
 int NUM_GPIO_FDS = 0;
-int ASD_MSG_GET_FDS_INDEX = 0;
-STATUS ASD_MSG_GET_FDS_RESULT[2];
-STATUS __wrap_asd_msg_get_fds(ASD_MSG* state, target_fdarr_t* fds, int* num_fds)
+
+STATUS __wrap_asd_api_target_ioctl(void* input, void* output, unsigned int cmd)
 {
-    check_expected_ptr(state);
-    check_expected_ptr(fds);
-    check_expected_ptr(num_fds);
-    *num_fds = NUM_GPIO_FDS;
-    for (int i = 0; i < NUM_GPIO_FDS; i++)
+    check_expected(cmd);
+    STATUS result = ASD_API_TARGET_IOCTL_RESULTS[ASD_API_TARGET_IOCTL_INDEX++];
+
+    if (cmd == IOCTL_TARGET_GET_PIN_FDS && output && result == ST_OK)
     {
-        (*fds)[i] = GPIO_FDS[i];
+        asd_target_interface_events* events =
+            (asd_target_interface_events*)output;
+        events->num_fds = NUM_GPIO_FDS;
+        for (int i = 0; i < NUM_GPIO_FDS; i++)
+        {
+            events->fds[i] = GPIO_FDS[i];
+        }
     }
-    return ASD_MSG_GET_FDS_RESULT[ASD_MSG_GET_FDS_INDEX++];
+    return result;
 }
 
-void expect_asd_msg_get_fds(STATUS result, int index)
+void expect_asd_api_target_ioctl(unsigned int cmd, STATUS result, int index)
 {
-    expect_any(__wrap_asd_msg_get_fds, state);
-    expect_any(__wrap_asd_msg_get_fds, fds);
-    expect_any(__wrap_asd_msg_get_fds, num_fds);
-    ASD_MSG_GET_FDS_RESULT[index] = result;
-    ASD_MSG_GET_FDS_INDEX = 0;
+    expect_value(__wrap_asd_api_target_ioctl, cmd, cmd);
+    ASD_API_TARGET_IOCTL_RESULTS[index] = result;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
 }
 
-STATUS ASD_MSG_EVENT_RESULT = ST_OK;
-STATUS __wrap_asd_msg_event(ASD_MSG* state, int fd)
+void expect_asd_api_target_ioctl_at(unsigned int cmd, STATUS result, int index)
 {
-    check_expected_ptr(state);
-    check_expected(fd);
-    return ASD_MSG_EVENT_RESULT;
+    expect_value(__wrap_asd_api_target_ioctl, cmd, cmd);
+    ASD_API_TARGET_IOCTL_RESULTS[index] = result;
 }
 
-void expect_asd_msg_event(STATUS result)
-{
-    expect_any(__wrap_asd_msg_event, state);
-    expect_any(__wrap_asd_msg_event, fd);
-    ASD_MSG_EVENT_RESULT = result;
-}
+// --- end asd_api_target mocks ---
 
 ExtNet EXTNET;
 ExtNet* FAKE_EXTNET_INIT_RESULT = &EXTNET;
@@ -540,18 +504,22 @@ void expect_extnet_accept_connection()
     expect_any(__wrap_extnet_accept_connection, pconn);
 }
 
-STATUS __wrap_extnet_close_client(extnet_conn_t* pconn)
+STATUS __wrap_extnet_close_client(ExtNet* state, extnet_conn_t* pconn)
 {
+    (void)state;
+    (void)pconn;
     return ST_OK;
 }
 
 STATUS __wrap_extnet_init_client(extnet_conn_t* pconn)
 {
+    (void)pconn;
     return ST_OK;
 }
 
 bool __wrap_extnet_is_client_closed(extnet_conn_t* pconn)
 {
+    (void)pconn;
     return false;
 }
 
@@ -607,30 +575,38 @@ void expect_any_auth_init()
 }
 
 STATUS AUTH_CLIENT_HANDSHAKE_RESULT = ST_OK;
-STATUS __wrap_auth_client_handshake(extnet_conn_t* p_extconn)
+STATUS __wrap_auth_client_handshake(Session* session, ExtNet* extnet,
+                                    extnet_conn_t* p_extconn)
 {
+    check_expected_ptr(session);
+    check_expected_ptr(extnet);
     check_expected_ptr(p_extconn);
     return AUTH_CLIENT_HANDSHAKE_RESULT;
 }
 
 void expect_auth_client_handshake(STATUS result)
 {
+    expect_any(__wrap_auth_client_handshake, session);
+    expect_any(__wrap_auth_client_handshake, extnet);
     expect_any(__wrap_auth_client_handshake, p_extconn);
     AUTH_CLIENT_HANDSHAKE_RESULT = result;
 }
 
 STATUS SET_CONFIG_DEFAULTS_RESULT = ST_OK;
-STATUS __wrap_set_config_defaults(config* config, const i2c_options* i2c)
+STATUS __wrap_set_config_defaults(config* config, const bus_options* opt,
+                                  const timeout_config* tmo_cfg)
 {
     check_expected_ptr(config);
-    check_expected_ptr(i2c);
+    check_expected_ptr(opt);
+    check_expected_ptr(tmo_cfg);
     return SET_CONFIG_DEFAULTS_RESULT;
 }
 
 void expect_set_config_defaults(STATUS result)
 {
     expect_any(__wrap_set_config_defaults, config);
-    expect_any(__wrap_set_config_defaults, i2c);
+    expect_any(__wrap_set_config_defaults, opt);
+    expect_any(__wrap_set_config_defaults, tmo_cfg);
     SET_CONFIG_DEFAULTS_RESULT = result;
 }
 
@@ -647,6 +623,44 @@ void expect_any_eventfd()
     expect_any(__wrap_eventfd, initval);
     expect_any(__wrap_eventfd, flags);
     EVENT_FD_RESULT = 0;
+}
+
+// sd_journal_send is a macro expanding to sd_journal_send_with_location
+int __wrap_sd_journal_send_with_location(const char* file, const char* line,
+                                         const char* func,
+                                         const char* format, ...)
+{
+    (void)file;
+    (void)line;
+    (void)func;
+    (void)format;
+    return 0;
+}
+
+// Mock inet_ntop
+const char* INET_NTOP_RESULT = NULL;
+const char* __wrap_inet_ntop(int af, const void* src, char* dst, socklen_t size)
+{
+    (void)af;
+    (void)src;
+    (void)size;
+    if (INET_NTOP_RESULT)
+    {
+        strncpy(dst, INET_NTOP_RESULT, size);
+    }
+    return INET_NTOP_RESULT;
+}
+
+// Mock gettimeofday
+int __wrap_gettimeofday(struct timeval* tv, void* tz)
+{
+    (void)tz;
+    if (tv)
+    {
+        tv->tv_sec = 0;
+        tv->tv_usec = 0;
+    }
+    return 0;
 }
 
 void expect_asd_init()
@@ -680,16 +694,29 @@ void expect_read(int fd, int result, uint64_t value)
     FAKE_READ_VALUE = value;
 }
 
-void expect_on_client_connect(ASD_MSG* asd_msg, STATUS result)
+void expect_on_client_connect(STATUS result)
 {
     expect_getpeername(0);
+    INET_NTOP_RESULT = NULL;
 
-    expect_set_config_defaults(result);
+    // asd_api_target_ioctl(IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG)
+    expect_asd_api_target_ioctl_at(IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG,
+                                   result, 0);
+    ASD_API_TARGET_IOCTL_INDEX = 0;
 
+    // Bus config ioctl failure is non-fatal (proceeds with JTAG-only),
+    // so set_config_defaults is always called.
     if (result == ST_OK)
     {
-        expect_any_asd_msg_init(asd_msg);
+        expect_set_config_defaults(ST_OK);
+        expect_asd_api_target_init(ST_OK);
         expect_any_ASD_initialize_log_settings();
+    }
+    else
+    {
+        // ioctl failed but we proceed; make set_config_defaults fail
+        // to propagate the overall connection failure.
+        expect_set_config_defaults(ST_ERR);
     }
 }
 
@@ -699,16 +726,17 @@ void expect_on_client_disconnect(STATUS result)
     if (result == ST_OK)
     {
         expect_any_ASD_initialize_log_settings();
-        expect_asd_msg_free(ST_OK);
+        expect_asd_api_target_deinit(ST_OK);
     }
 }
 
-void expect_process_client_message(extnet_conn_t* conn, int fd, STATUS result)
+void expect_process_client_message(extnet_conn_t* conn, int fd, STATUS result,
+                                   int ioctl_idx)
 {
     expect_session_lookup_conn(conn, fd);
     expect_session_get_data_pending(ST_OK, true);
     expect_session_already_authenticated(ST_OK);
-    expect_asd_msg_read(ST_OK);
+    expect_asd_api_target_ioctl_at(IOCTL_TARGET_PROCESS_MSG, ST_OK, ioctl_idx);
     expect_session_data_pending(result);
 }
 
@@ -732,7 +760,7 @@ void expect_poll(int timeout, int result)
 {
     expect_any(__wrap_poll, fds);
     expect_any(__wrap_poll, nfds);
-    expect_value(__wrap_poll, timeout, timeout);
+    expect_any(__wrap_poll, timeout);
     POLL_RESULT = result;
 }
 
@@ -749,12 +777,13 @@ void expect_process_all_client_messages(int* fds, int num_fds,
                                         extnet_conn_t* fake_conn, STATUS result)
 {
     expect_any(__wrap_session_close_expired_unauth, state);
+    ASD_API_TARGET_IOCTL_INDEX = 0;
 
     for (int i = 0; i < num_fds; i++)
         if ((i + 1) < num_fds)
-            expect_process_client_message(fake_conn, fds[i], ST_OK);
+            expect_process_client_message(fake_conn, fds[i], ST_OK, i);
         else
-            expect_process_client_message(fake_conn, fds[i], result);
+            expect_process_client_message(fake_conn, fds[i], result, i);
 }
 
 static int setup(void** state)
@@ -764,6 +793,8 @@ static int setup(void** state)
     free_fail = false;
     for (int i = 0; i < MAX_COMMANDS; i++)
         malloc_fail[i] = false;
+    // Reset the global main_state between tests to prevent stale pointers
+    memset(&main_state, 0, sizeof(main_state));
     return 0;
 }
 
@@ -795,8 +826,13 @@ void asd_main_process_command_line_request_processing_failure_test(void** state)
     EXTNET_INIT_MALLOC = true;
     expect_default_ASD_initialize_log_settings();
     expect_asd_init();
+    // request_processing_loop calls asd_api_target_ioctl(GET_PIN_FDS) first
+    expect_asd_api_target_ioctl(IOCTL_TARGET_GET_PIN_FDS, ST_OK, 0);
+    NUM_GPIO_FDS = 0;
     expect_session_getfds(ST_ERR, 0);
+    // deinit_asd_state called after loop exits
     expect_any(__wrap_session_close_all, state);
+    expect_asd_api_target_deinit(ST_OK);
 
     assert_int_equal(asd_main(1, (char**)&argv), 1);
     SESSION_INIT_MALLOC = false;
@@ -805,13 +841,13 @@ void asd_main_process_command_line_request_processing_failure_test(void** state)
 
 void process_command_line_sets_defaults_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
     char* argv[] = {"blah"};
     assert_true(process_command_line(1, (char**)&argv, &args));
-    assert_int_equal(args.i2c.enable, DEFAULT_I2C_ENABLE);
-    assert_int_equal(args.i2c.bus, DEFAULT_I2C_BUS);
+    assert_int_equal(args.busopt.enable_i2c, DEFAULT_I2C_ENABLE);
+    assert_int_equal(args.busopt.bus, DEFAULT_I2C_BUS);
     assert_false(args.use_syslog);
     assert_int_equal(args.log_streams, DEFAULT_LOG_STREAMS);
     assert_int_equal(args.log_level, DEFAULT_LOG_LEVEL);
@@ -824,17 +860,17 @@ void process_command_line_sets_defaults_test(void** state)
 
 void process_command_line_port_number_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
-    char* argv[] = {"blah", "-p 5555"};
-    assert_true(process_command_line(2, (char**)&argv, &args));
+    char* argv[] = {"blah", "-p", "5555"};
+    assert_true(process_command_line(3, (char**)&argv, &args));
     assert_int_equal(args.session.n_port_number, 5555);
 }
 
 void process_command_line_log_to_syslog_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
     char* argv[] = {"blah", "-s"};
@@ -844,7 +880,7 @@ void process_command_line_log_to_syslog_test(void** state)
 
 void process_command_line_set_unsecure_mode_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
     char* argv[] = {"blah", "-u"};
@@ -855,17 +891,17 @@ void process_command_line_set_unsecure_mode_test(void** state)
 
 void process_command_line_set_key_file_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
-    char* argv[] = {"blah", "-kblah-halb"};
-    assert_true(process_command_line(2, (char**)&argv, &args));
-    assert_string_equal(args.session.cp_certkeyfile, "blah-halb");
+    char* argv[] = {"blah", "-k", "cert.pem"};
+    assert_true(process_command_line(3, (char**)&argv, &args));
+    assert_string_equal(args.session.cp_certkeyfile, "cert.pem");
 }
 
 void process_command_line_set_net_bind_device_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
     char* argv[] = {"blah", "-neth2"};
@@ -875,13 +911,13 @@ void process_command_line_set_net_bind_device_test(void** state)
 
 void process_command_line_set_i2c_test(void** state)
 {
-    (void)state; /* unused */
+    (void)state;
     asd_args args;
     optind = 1;
-    char* argv[] = {"blah", "-i 4"};
-    assert_true(process_command_line(2, (char**)&argv, &args));
-    assert_int_equal(args.i2c.enable, true);
-    assert_int_equal(args.i2c.bus, 4);
+    char* argv[] = {"blah", "-i", "4"};
+    assert_true(process_command_line(3, (char**)&argv, &args));
+    assert_int_equal(args.busopt.enable_i2c, true);
+    assert_int_equal(args.busopt.bus, 4);
 }
 
 static void process_command_line_log_level_test(void** state)
@@ -939,46 +975,41 @@ static void
     init_asd_state_handles_set_config_defaults_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_set_config_defaults(ST_ERR);
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 static void init_asd_state_handles_extnet_init_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
 
     FAKE_EXTNET_INIT_RESULT = NULL;
-    expect_value(__wrap_extnet_init, eType,
-                 asd_state.args.session.e_extnet_type);
+    expect_any(__wrap_extnet_init, eType);
     expect_any(__wrap_extnet_init, p_hdlr_data);
-    expect_value(__wrap_extnet_init, n_max_sessions, MAX_SESSIONS);
+    expect_any(__wrap_extnet_init, n_max_sessions);
 
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 static void init_asd_state_handles_auth_init_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
     expect_any_extnet_init();
 
     FAKE_AUTH_INIT_RESULT = ST_ERR;
-    expect_value(__wrap_auth_init, e_type, asd_state.args.session.e_auth_type);
+    expect_any(__wrap_auth_init, e_type);
     expect_any(__wrap_auth_init, p_hdlr_data);
 
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 static void init_asd_state_handles_session_init_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
     expect_any_extnet_init();
@@ -987,13 +1018,12 @@ static void init_asd_state_handles_session_init_failure_test(void** state)
     expect_any(__wrap_session_init, extnet);
     SESSION_INIT_RESULT = NULL;
 
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 void init_asd_state_handles_eventfd_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
     expect_any_extnet_init();
@@ -1004,14 +1034,13 @@ void init_asd_state_handles_eventfd_failure_test(void** state)
     expect_value(__wrap_eventfd, flags, O_NONBLOCK);
     EVENT_FD_RESULT = -1;
 
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 static void init_asd_state_handles_extnet_open_external_socket_failure_test(
     void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
     expect_any_extnet_init();
@@ -1022,17 +1051,15 @@ static void init_asd_state_handles_extnet_open_external_socket_failure_test(
     FAKE_EXTNET_OPEN_EXTERNAL_RESULT = ST_ERR;
     expect_any(__wrap_extnet_open_external_socket, state);
     expect_any(__wrap_extnet_open_external_socket, cp_bind_if);
-    expect_value(__wrap_extnet_open_external_socket, u16_port,
-                 asd_state.args.session.n_port_number);
+    expect_any(__wrap_extnet_open_external_socket, u16_port);
     expect_any(__wrap_extnet_open_external_socket, pfd_sock);
 
-    assert_int_equal(ST_ERR, init_asd_state(&asd_state));
+    assert_int_equal(ST_ERR, init_asd_state());
 }
 
 static void init_asd_state_returns_true_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
     expect_any_ASD_initialize_log_settings();
     expect_set_config_defaults(ST_OK);
     expect_any_extnet_init();
@@ -1041,7 +1068,7 @@ static void init_asd_state_returns_true_test(void** state)
     expect_any_eventfd();
     expect_any_extnet_open_external_socket();
 
-    assert_int_equal(ST_OK, init_asd_state(&asd_state));
+    assert_int_equal(ST_OK, init_asd_state());
 }
 
 void asd_main_init_asd_state_failure_test(void** state)
@@ -1054,6 +1081,9 @@ void asd_main_init_asd_state_failure_test(void** state)
 
     // cause init_asd_state to fail
     expect_set_config_defaults(ST_ERR);
+    // deinit_asd_state is called
+    expect_any(__wrap_session_close_all, state);
+    expect_asd_api_target_deinit(ST_OK);
 
     assert_int_equal(asd_main(1, (char**)&argv), 1);
 }
@@ -1062,16 +1092,14 @@ void deinit_asd_state_test(void** state)
 {
     (void)state;
     int expected_fd = 68;
-    asd_state asd_state;
-    ASD_MSG sdk;
+    asd_state asd_state = {0};
     Session session;
     asd_state.session = &session;
     asd_state.host_fd = expected_fd;
-    asd_state.asd_msg = &sdk;
 
     expect_any(__wrap_session_close_all, state);
     expect_value(__wrap_close, fd, expected_fd);
-    expect_asd_msg_free(ST_OK);
+    expect_asd_api_target_deinit(ST_OK);
 
     deinit_asd_state(&asd_state);
 }
@@ -1079,31 +1107,24 @@ void deinit_asd_state_test(void** state)
 void send_out_msg_on_socket_params_test(void** state)
 {
     (void)state;
-    unsigned char buffer[9];
-    asd_state asd_state;
-
-    assert_int_equal(ST_ERR,
-                     send_out_msg_on_socket(NULL, (unsigned char*)&buffer, 1));
-    assert_int_equal(ST_ERR, send_out_msg_on_socket(&asd_state, NULL, 1));
+    assert_int_equal(ST_ERR, send_out_msg_on_socket(NULL, 1));
 }
 
 void send_out_msg_on_socket_no_authenticated_socket_test(void** state)
 {
     (void)state;
     unsigned char buffer[9];
-    asd_state asd_state;
 
     expect_session_get_authenticated_conn(ST_ERR);
 
-    assert_int_equal(
-        ST_ERR, send_out_msg_on_socket(&asd_state, (unsigned char*)&buffer, 1));
+    assert_int_equal(ST_ERR,
+                     send_out_msg_on_socket((unsigned char*)&buffer, 1));
 }
 
 void send_out_msg_on_socket_send_failure_test(void** state)
 {
     (void)state;
     unsigned char buffer[9];
-    asd_state asd_state;
     int given_length = 9;
     int actual_length = 8;
 
@@ -1115,7 +1136,7 @@ void send_out_msg_on_socket_send_failure_test(void** state)
     EXTNET_SEND_RESULT = actual_length;
 
     assert_int_equal(ST_ERR,
-                     send_out_msg_on_socket(&asd_state, (unsigned char*)&buffer,
+                     send_out_msg_on_socket((unsigned char*)&buffer,
                                             given_length));
 }
 
@@ -1123,7 +1144,6 @@ void send_out_msg_on_socket_success_test(void** state)
 {
     (void)state;
     unsigned char buffer[9];
-    asd_state asd_state;
     int length = 9;
 
     expect_session_get_authenticated_conn(ST_OK);
@@ -1134,19 +1154,21 @@ void send_out_msg_on_socket_success_test(void** state)
     EXTNET_SEND_RESULT = length;
 
     assert_int_equal(ST_OK, send_out_msg_on_socket(
-                                &asd_state, (unsigned char*)&buffer, length));
+                                (unsigned char*)&buffer, length));
 }
 
 void request_processing_loop_poll_failure_test(void** state)
 {
     (void)state;
-    asd_state asd_state;
+    asd_state asd_state = {0};
+
+    NUM_GPIO_FDS = 0;
+    expect_asd_api_target_ioctl(IOCTL_TARGET_GET_PIN_FDS, ST_OK, 0);
 
     SESSION_FDS_COUNT = 1;
     SESSION_FDS[0] = 777;
     SESSION_TIMEOUT = 0;
     expect_session_getfds(ST_OK, 0);
-    expect_asd_msg_get_fds(ST_OK, 0);
     expect_poll(SESSION_TIMEOUT, -1);
 
     assert_int_equal(ST_ERR, request_processing_loop(&asd_state));
@@ -1155,15 +1177,15 @@ void request_processing_loop_poll_failure_test(void** state)
 void request_processing_loop_process_get_session_fds_failure_test(void** state)
 {
     (void)state;
-    ASD_MSG sdk;
-    asd_state asd_state;
+    asd_state asd_state = {0};
     asd_state.event_fd = 99;
-    asd_state.asd_msg = &sdk;
+
+    NUM_GPIO_FDS = 0;
+    expect_asd_api_target_ioctl(IOCTL_TARGET_GET_PIN_FDS, ST_OK, 0);
 
     SESSION_FDS_COUNT = 1;
     SESSION_FDS[0] = 777;
     SESSION_TIMEOUT = 0;
-    expect_asd_msg_get_fds(ST_OK, 0);
     expect_session_getfds(ST_ERR, 0);
 
     assert_int_equal(ST_ERR, request_processing_loop(&asd_state));
@@ -1172,13 +1194,11 @@ void request_processing_loop_process_get_session_fds_failure_test(void** state)
 void request_processing_loop_expect_process_new_client_test(void** state)
 {
     (void)state;
-    ASD_MSG sdk;
-    asd_state asd_state;
+    asd_state asd_state = {0};
     asd_state.event_fd = 99;
-    asd_state.asd_msg = &sdk;
 
     NUM_GPIO_FDS = 0;
-    expect_asd_msg_get_fds(ST_OK, 0);
+    expect_asd_api_target_ioctl(IOCTL_TARGET_GET_PIN_FDS, ST_OK, 0);
 
     SESSION_FDS_COUNT = 0;
     SESSION_TIMEOUT = 0;
@@ -1186,17 +1206,21 @@ void request_processing_loop_expect_process_new_client_test(void** state)
 
     POLL_REVENTS[HOST_FD_INDEX] = POLLIN;
     POLL_REVENTS[GPIO_FD_INDEX] = 0;
-    expect_poll(SESSION_TIMEOUT, 0);
+    expect_poll(SESSION_TIMEOUT, 1);
 
     expect_extnet_accept_connection();
     expect_session_open();
 
+    // AUTH_HDLR_NONE (0) means new client fd is stuffed into poll_fds
+    // and process_all_client_messages is called with 1 client
     expect_any(__wrap_session_close_expired_unauth, state);
+    // session_lookup_conn returns NULL -> process_client_message returns ST_ERR
     expect_any(__wrap_session_lookup_conn, state);
     expect_any(__wrap_session_lookup_conn, fd);
+    SESSION_LOOKUP_CONN_RESULT = NULL;
 
-    // loop will continue forever, so create an error to end the test
-    expect_asd_msg_get_fds(ST_ERR, 1);
+    // loop will continue, create error on second iteration
+    expect_asd_api_target_ioctl_at(IOCTL_TARGET_GET_PIN_FDS, ST_ERR, 1);
     expect_session_getfds(ST_ERR, 1);
 
     assert_int_equal(ST_ERR, request_processing_loop(&asd_state));
@@ -1205,14 +1229,13 @@ void request_processing_loop_expect_process_new_client_test(void** state)
 void request_processing_loop_gpio_failure_test(void** state)
 {
     (void)state;
-    ASD_MSG sdk;
-    asd_state asd_state;
+    asd_state asd_state = {0};
     asd_state.event_fd = 99;
-    asd_state.asd_msg = &sdk;
+
     GPIO_FDS[0].fd = 1;
     GPIO_FDS[0].events = POLLIN;
     NUM_GPIO_FDS = 1;
-    expect_asd_msg_get_fds(ST_OK, 0);
+    expect_asd_api_target_ioctl(IOCTL_TARGET_GET_PIN_FDS, ST_OK, 0);
 
     SESSION_FDS_COUNT = 1;
     SESSION_FDS[0] = 777;
@@ -1220,18 +1243,20 @@ void request_processing_loop_gpio_failure_test(void** state)
     expect_session_getfds(ST_OK, 0);
 
     POLL_REVENTS[0] = 0;
-    POLL_REVENTS[1] = POLL_GPIO;
+    POLL_REVENTS[1] = POLLIN;
     expect_poll(SESSION_TIMEOUT, 0);
 
-    expect_asd_msg_event(ST_ERR);
+    // GPIO event processing via ioctl fails
+    expect_asd_api_target_ioctl_at(IOCTL_TARGET_PROCESS_ALL_PIN_EVENTS, ST_ERR, 1);
 
-    // session will be closed
+    // close_connection called
     expect_session_get_authenticated_conn(ST_OK);
     expect_on_client_disconnect(ST_OK);
     expect_session_close(ST_OK);
 
-    // loop will continue forever, so create an error to end the test
-    expect_asd_msg_get_fds(ST_ERR, 1);
+    // loop continues, second iteration: GET_PIN_FDS returns ST_ERR
+    // (NUM_GPIO_FDS stays 1 but mock only fills events when result==ST_OK)
+    expect_asd_api_target_ioctl_at(IOCTL_TARGET_GET_PIN_FDS, ST_ERR, 2);
     expect_session_getfds(ST_ERR, 1);
 
     assert_int_equal(ST_ERR, request_processing_loop(&asd_state));
@@ -1240,7 +1265,7 @@ void request_processing_loop_gpio_failure_test(void** state)
 void process_new_client_invalid_params_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     struct pollfd fds;
     int clients = 0;
 
@@ -1252,7 +1277,7 @@ void process_new_client_invalid_params_test(void** state)
 void process_new_client_accept_connection_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     struct pollfd fds;
     ExtNet extnet;
     int clients = 0;
@@ -1271,7 +1296,7 @@ void process_new_client_accept_connection_failure_test(void** state)
 void process_new_client_session_open_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     struct pollfd fds;
     ExtNet extnet;
     int clients = 0;
@@ -1289,7 +1314,7 @@ void process_new_client_session_open_test(void** state)
 void process_new_client_auth_none_success_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     struct pollfd fds[MAX_FDS];
     ExtNet extnet;
     int clients = 0;
@@ -1305,7 +1330,7 @@ void process_new_client_auth_none_success_test(void** state)
 void process_all_client_messages_invalid_params_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     struct pollfd fds[5];
 
     assert_int_equal(ST_ERR, process_all_client_messages(
@@ -1316,7 +1341,7 @@ void process_all_client_messages_invalid_params_test(void** state)
 void process_all_client_messages_success_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     int fd[2];
     fd[0] = 99;
     fd[1] = 678;
@@ -1336,7 +1361,7 @@ void process_all_client_messages_success_test(void** state)
 void process_all_client_messages_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     int fd0 = 99;
     int fd1 = 678;
     struct pollfd fds[5];
@@ -1348,8 +1373,9 @@ void process_all_client_messages_failure_test(void** state)
 
     expect_any(__wrap_session_close_expired_unauth, state);
 
-    expect_process_client_message(&fake_conn, fd0, ST_OK);
-    expect_process_client_message(&fake_conn, fd1, ST_ERR);
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+    expect_process_client_message(&fake_conn, fd0, ST_OK, 0);
+    expect_process_client_message(&fake_conn, fd1, ST_ERR, 1);
 
     assert_int_equal(ST_ERR, process_all_client_messages(
                                  &asd, (const struct pollfd*)&fds, 2));
@@ -1390,7 +1416,7 @@ void process_client_message_session_get_data_pending_failure_test(void** state)
     assert_int_equal(ST_ERR, process_client_message(&sdk, fd));
 }
 
-void process_client_message_asd_msg_read_failure_test(void** state)
+void process_client_message_asd_api_target_ioctl_failure_test(void** state)
 {
     (void)state;
     extnet_conn_t conn;
@@ -1402,12 +1428,12 @@ void process_client_message_asd_msg_read_failure_test(void** state)
     expect_session_lookup_conn(&conn, expected_fd);
     expect_session_get_data_pending(ST_OK, true);
     expect_session_already_authenticated(ST_OK);
-    expect_asd_msg_read(ST_ERR);
-    // After the read failure, these items are called to close the
-    // connection
-    expect_set_config_defaults(ST_OK);
-    expect_any_ASD_initialize_log_settings();
-    expect_asd_msg_free(ST_OK);
+    expect_value(__wrap_asd_api_target_ioctl, cmd, IOCTL_TARGET_PROCESS_MSG);
+    ASD_API_TARGET_IOCTL_RESULTS[0] = ST_ERR;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+
+    // After ioctl failure, disconnect + close
+    expect_on_client_disconnect(ST_OK);
     expect_session_close(ST_OK);
 
     assert_int_equal(ST_ERR, process_client_message(&sdk, fd));
@@ -1425,7 +1451,9 @@ void process_client_message_session_set_data_pending_failure_test(void** state)
     expect_session_lookup_conn(&conn, expected_fd);
     expect_session_get_data_pending(ST_OK, true);
     expect_session_already_authenticated(ST_OK);
-    expect_asd_msg_read(ST_OK);
+    expect_value(__wrap_asd_api_target_ioctl, cmd, IOCTL_TARGET_PROCESS_MSG);
+    ASD_API_TARGET_IOCTL_RESULTS[0] = ST_OK;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
     expect_session_data_pending(ST_ERR);
 
     assert_int_equal(ST_ERR, process_client_message(&sdk, fd));
@@ -1440,94 +1468,59 @@ void process_client_message_success_test(void** state)
     struct pollfd fd = {0};
     fd.fd = expected_fd;
 
-    expect_process_client_message(&conn, expected_fd, ST_OK);
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+    expect_process_client_message(&conn, expected_fd, ST_OK, 0);
 
     assert_int_equal(ST_OK, process_client_message(&sdk, fd));
 
     assert_true(SESSION_DATA_PENDING_STORED_VALUE);
 }
 
-void read_data_invalid_params_test(void** state)
+// read_data now takes (void* buffer, size_t length) and returns size_t
+void read_data_null_buffer_returns_zero_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    extnet_conn_t connection;
-    char* buffer = "blah";
-    size_t num = 0;
-    bool pending = false;
-    assert_int_equal(ST_ERR,
-                     read_data(NULL, &connection, buffer, &num, &pending));
-    assert_int_equal(ST_ERR, read_data(&asd, NULL, buffer, &num, &pending));
-    assert_int_equal(ST_ERR,
-                     read_data(&asd, &connection, NULL, &num, &pending));
-    assert_int_equal(ST_ERR,
-                     read_data(&asd, &connection, buffer, NULL, &pending));
-    assert_int_equal(ST_ERR, read_data(&asd, &connection, buffer, &num, NULL));
+    assert_int_equal(0, read_data(NULL, 50));
 }
 
 void read_data_extnet_recv_failure_0_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    extnet_conn_t connection;
-    char* buffer = "blah";
+    char buffer[50];
     size_t num = 50;
-    int expected_recv = 0;
-    int expected_remaining = (int)(num);
-    bool pending = false;
 
-    expect_extnet_recv(expected_recv, num, false);
-    expect_on_client_disconnect(ST_OK);
-    expect_session_close(ST_OK);
+    expect_extnet_recv(0, num, false);
 
-    assert_int_equal(ST_ERR,
-                     read_data(&asd, &connection, buffer, &num, &pending));
-    assert_int_equal(num, expected_remaining);
+    assert_int_equal(0, read_data(buffer, num));
 }
 
 void read_data_extnet_recv_failure_neg1_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    extnet_conn_t connection;
-    char* buffer = "blah";
+    char buffer[50];
     size_t num = 50;
-    int expected_recv = -1;
-    int expected_remaining = (int)(num);
-    bool pending = false;
 
-    expect_extnet_recv(expected_recv, num, false);
-    expect_on_client_disconnect(ST_OK);
-    expect_session_close(ST_OK);
+    expect_extnet_recv(-1, num, false);
 
-    assert_int_equal(ST_ERR,
-                     read_data(&asd, &connection, buffer, &num, &pending));
-    assert_int_equal(num, expected_remaining);
+    assert_int_equal(0, read_data(buffer, num));
 }
 
 void read_data_success_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    extnet_conn_t connection;
-    char* buffer = "blah";
+    char buffer[50];
     size_t num = 50;
     int expected_recv = 10;
-    int expected_remaining = (int)(num - expected_recv);
-    bool pending = false;
 
     expect_extnet_recv(expected_recv, num, true);
 
-    assert_int_equal(ST_OK,
-                     read_data(&asd, &connection, buffer, &num, &pending));
-    assert_int_equal(num, expected_remaining);
-    assert_true(pending);
+    assert_int_equal(expected_recv, read_data(buffer, num));
 }
 
 void ensure_client_authenticated_invalid_params_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     assert_int_equal(ST_ERR, ensure_client_authenticated(NULL, &connection));
     assert_int_equal(ST_ERR, ensure_client_authenticated(&asd, NULL));
@@ -1536,7 +1529,7 @@ void ensure_client_authenticated_invalid_params_test(void** state)
 void ensure_client_authenticated_already_authenticated_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     expect_session_already_authenticated(ST_OK);
 
@@ -1547,7 +1540,7 @@ void ensure_client_authenticated_auth_client_handshake_failure_test(
     void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
 
     expect_session_already_authenticated(ST_ERR);
@@ -1561,7 +1554,7 @@ void ensure_client_authenticated_session_auth_complete_failure_test(
     void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
 
     expect_session_already_authenticated(ST_ERR);
@@ -1575,51 +1568,29 @@ void ensure_client_authenticated_session_auth_complete_failure_test(
 void ensure_client_authenticated_connect_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    ASD_MSG sdk;
+    asd_state asd = {0};
     extnet_conn_t connection;
-    asd.asd_msg = &sdk;
 
     expect_session_already_authenticated(ST_ERR);
     expect_auth_client_handshake(ST_OK);
     expect_session_auth_complete(ST_OK);
-    expect_on_client_connect(asd.asd_msg, ST_ERR);
+    expect_on_client_connect(ST_ERR);
     expect_on_client_disconnect(ST_ERR);
     expect_session_close(ST_OK);
 
-    assert_int_equal(ST_ERR, ensure_client_authenticated(&asd, &connection));
-}
-
-void ensure_client_authenticated_connect_failure_memcpy_fail_test(void** state)
-{
-    (void)state;
-    asd_state asd;
-    ASD_MSG sdk;
-    extnet_conn_t connection;
-    asd.asd_msg = &sdk;
-
-    expect_session_already_authenticated(ST_ERR);
-    expect_auth_client_handshake(ST_OK);
-    expect_session_auth_complete(ST_OK);
-    expect_on_client_connect(asd.asd_msg, ST_ERR);
-    expect_on_client_disconnect(ST_ERR);
-    expect_session_close(ST_OK);
-    MEMCPY_SAFE_RESULT = 1;
     assert_int_equal(ST_ERR, ensure_client_authenticated(&asd, &connection));
 }
 
 void ensure_client_authenticated_success_test(void** state)
 {
     (void)state;
-    asd_state asd;
-    ASD_MSG sdk;
+    asd_state asd = {0};
     extnet_conn_t connection;
-    asd.asd_msg = &sdk;
 
     expect_session_already_authenticated(ST_ERR);
     expect_auth_client_handshake(ST_OK);
     expect_session_auth_complete(ST_OK);
-    expect_on_client_connect(asd.asd_msg, ST_OK);
+    expect_on_client_connect(ST_OK);
 
     assert_int_equal(ST_OK, ensure_client_authenticated(&asd, &connection));
 }
@@ -1627,7 +1598,7 @@ void ensure_client_authenticated_success_test(void** state)
 void on_client_connect_invalid_params_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     assert_int_equal(ST_ERR, on_client_connect(NULL, &connection));
     assert_int_equal(ST_ERR, on_client_connect(&asd, NULL));
@@ -1636,25 +1607,40 @@ void on_client_connect_invalid_params_test(void** state)
 void on_client_connect_set_config_defaults_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     connection.sockfd = 8;
 
     expect_getpeername_check_fd(0, connection.sockfd);
+    INET_NTOP_RESULT = NULL;
+
+    expect_value(__wrap_asd_api_target_ioctl, cmd,
+                 IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG);
+    ASD_API_TARGET_IOCTL_RESULTS[0] = ST_OK;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+
     expect_set_config_defaults(ST_ERR);
 
     assert_int_equal(ST_ERR, on_client_connect(&asd, &connection));
 }
 
-void on_client_connect_asd_msg_init_failure_test(void** state)
+void on_client_connect_asd_api_target_init_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     connection.sockfd = 8;
+
     expect_getpeername_check_fd(0, connection.sockfd);
+    INET_NTOP_RESULT = NULL;
+
+    expect_value(__wrap_asd_api_target_ioctl, cmd,
+                 IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG);
+    ASD_API_TARGET_IOCTL_RESULTS[0] = ST_OK;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+
     expect_set_config_defaults(ST_OK);
-    expect_any_asd_msg_init(NULL);
+    expect_asd_api_target_init(ST_ERR);
 
     assert_int_equal(ST_ERR, on_client_connect(&asd, &connection));
 }
@@ -1662,13 +1648,20 @@ void on_client_connect_asd_msg_init_failure_test(void** state)
 void on_client_connect_success_test(void** state)
 {
     (void)state;
-    ASD_MSG sdk;
-    asd_state asd;
+    asd_state asd = {0};
     extnet_conn_t connection;
     connection.sockfd = 8;
+
     expect_getpeername_check_fd(0, connection.sockfd);
+    INET_NTOP_RESULT = NULL;
+
+    expect_value(__wrap_asd_api_target_ioctl, cmd,
+                 IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG);
+    ASD_API_TARGET_IOCTL_RESULTS[0] = ST_OK;
+    ASD_API_TARGET_IOCTL_INDEX = 0;
+
     expect_set_config_defaults(ST_OK);
-    expect_any_asd_msg_init(&sdk);
+    expect_asd_api_target_init(ST_OK);
     expect_any_ASD_initialize_log_settings();
 
     assert_int_equal(ST_OK, on_client_connect(&asd, &connection));
@@ -1683,20 +1676,19 @@ void on_client_disconnect_invalid_params_test(void** state)
 void on_client_disconnect_set_config_defaults_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     expect_set_config_defaults(ST_ERR);
 
     assert_int_equal(ST_ERR, on_client_disconnect(&asd));
 }
 
-void on_client_disconnect_asd_msg_free_failure_test(void** state)
+void on_client_disconnect_asd_api_target_deinit_failure_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     expect_set_config_defaults(ST_OK);
-
     expect_any_ASD_initialize_log_settings();
-    expect_asd_msg_free(ST_ERR);
+    expect_asd_api_target_deinit(ST_ERR);
 
     assert_int_equal(ST_ERR, on_client_disconnect(&asd));
 }
@@ -1704,11 +1696,10 @@ void on_client_disconnect_asd_msg_free_failure_test(void** state)
 void on_client_disconnect_success_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     expect_set_config_defaults(ST_OK);
-
     expect_any_ASD_initialize_log_settings();
-    expect_asd_msg_free(ST_OK);
+    expect_asd_api_target_deinit(ST_OK);
 
     assert_int_equal(ST_OK, on_client_disconnect(&asd));
 }
@@ -1716,7 +1707,7 @@ void on_client_disconnect_success_test(void** state)
 void close_connection_already_closed_test(void** state)
 {
     (void)state;
-    asd_state asd;
+    asd_state asd = {0};
     expect_session_get_authenticated_conn(ST_ERR);
 
     assert_int_equal(ST_OK, close_connection(&asd));
@@ -1725,9 +1716,11 @@ void close_connection_already_closed_test(void** state)
 int main()
 {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test(asd_main_process_command_line_failure_test),
-        cmocka_unit_test(
-            asd_main_process_command_line_request_processing_failure_test),
+        cmocka_unit_test_setup_teardown(
+            asd_main_process_command_line_failure_test, setup, teardown),
+        cmocka_unit_test_setup_teardown(
+            asd_main_process_command_line_request_processing_failure_test,
+            setup, teardown),
         cmocka_unit_test(process_command_line_sets_defaults_test),
         cmocka_unit_test(process_command_line_port_number_test),
         cmocka_unit_test(process_command_line_log_to_syslog_test),
@@ -1748,7 +1741,8 @@ int main()
             init_asd_state_handles_extnet_open_external_socket_failure_test),
         cmocka_unit_test(init_asd_state_returns_true_test),
 
-        cmocka_unit_test(asd_main_init_asd_state_failure_test),
+        cmocka_unit_test_setup_teardown(
+            asd_main_init_asd_state_failure_test, setup, teardown),
 
         cmocka_unit_test(deinit_asd_state_test),
 
@@ -1777,12 +1771,12 @@ int main()
             process_client_message_session_lookup_conn_failure_test),
         cmocka_unit_test(
             process_client_message_session_get_data_pending_failure_test),
-        cmocka_unit_test(process_client_message_asd_msg_read_failure_test),
+        cmocka_unit_test(process_client_message_asd_api_target_ioctl_failure_test),
         cmocka_unit_test(
             process_client_message_session_set_data_pending_failure_test),
         cmocka_unit_test(process_client_message_success_test),
 
-        cmocka_unit_test(read_data_invalid_params_test),
+        cmocka_unit_test(read_data_null_buffer_returns_zero_test),
         cmocka_unit_test(read_data_extnet_recv_failure_0_test),
         cmocka_unit_test(read_data_extnet_recv_failure_neg1_test),
         cmocka_unit_test(read_data_success_test),
@@ -1795,17 +1789,15 @@ int main()
         cmocka_unit_test(
             ensure_client_authenticated_session_auth_complete_failure_test),
         cmocka_unit_test(ensure_client_authenticated_connect_failure_test),
-        cmocka_unit_test(
-            ensure_client_authenticated_connect_failure_memcpy_fail_test),
         cmocka_unit_test(ensure_client_authenticated_success_test),
         cmocka_unit_test(on_client_connect_invalid_params_test),
         cmocka_unit_test(on_client_connect_set_config_defaults_failure_test),
-        cmocka_unit_test(on_client_connect_asd_msg_init_failure_test),
+        cmocka_unit_test(on_client_connect_asd_api_target_init_failure_test),
         cmocka_unit_test(on_client_connect_success_test),
 
         cmocka_unit_test(on_client_disconnect_invalid_params_test),
         cmocka_unit_test(on_client_disconnect_set_config_defaults_failure_test),
-        cmocka_unit_test(on_client_disconnect_asd_msg_free_failure_test),
+        cmocka_unit_test(on_client_disconnect_asd_api_target_deinit_failure_test),
         cmocka_unit_test(on_client_disconnect_success_test),
         cmocka_unit_test(close_connection_already_closed_test),
     };

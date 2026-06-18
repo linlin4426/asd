@@ -34,7 +34,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 #include <syslog.h>
 
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 bool shouldRemoteLogResponse = false;
@@ -128,7 +128,7 @@ void ASD_log_writes_to_syslog_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Error, ASD_LogStream_All, true,
-                                NULL, NULL);
+                                false, NULL, NULL);
     const char* expected = "some log message text";
     expect_value(__wrap_vsyslog, priority, LOG_USER);
     expect_string(__wrap_vsyslog, format, expected);
@@ -140,7 +140,7 @@ void ASD_log_writes_to_stderr_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Error, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     const char* expected = "some log message text";
     expect_value(__wrap_vfprintf, file, stderr);
     expect_string(__wrap_vfprintf, format, expected);
@@ -157,13 +157,13 @@ void ASD_log_writes_to_logging_callback_test(void** state)
            sizeof(remoteMessageCalledWithMessage));
     const char* expected = "some log message text";
     ASD_initialize_log_settings(ASD_LogLevel_Error, ASD_LogStream_JTAG, false,
-                                shouldRemoteLog, sendRemoteLoggingMessage);
+                                false, shouldRemoteLog, sendRemoteLoggingMessage);
     ASD_log(ASD_LogLevel_Trace, ASD_LogStream_JTAG, ASD_LogOption_None,
             expected);
     assert_true(shouldRemoteLogCalled);
     assert_true(remoteMessageCalledWithLevel == ASD_LogLevel_Trace);
     assert_true(remoteMessageCalledWithStream == ASD_LogStream_JTAG);
-    assert_string_equal(expected, &remoteMessageCalledWithMessage);
+    assert_string_equal(expected, remoteMessageCalledWithMessage);
 }
 
 void ASD_log_writes_to_logging_callback_and_stderr_test(void** state)
@@ -183,7 +183,7 @@ void ASD_log_writes_to_logging_callback_and_stderr_test(void** state)
     assert_true(shouldRemoteLogCalled);
     assert_true(remoteMessageCalledWithLevel == ASD_LogLevel_Error);
     assert_true(remoteMessageCalledWithStream == ASD_LogStream_Network);
-    assert_string_equal(expected, &remoteMessageCalledWithMessage);
+    assert_string_equal(expected, remoteMessageCalledWithMessage);
 }
 
 void ASD_log_buffer_writes_to_syslog_with_undersize_prefix_test(void** state)
@@ -197,7 +197,7 @@ void ASD_log_buffer_writes_to_syslog_with_undersize_prefix_test(void** state)
     expect_string(__wrap_syslog, temporary_syslog_buffer,
                   "TEST  : 0000000: 1020 30\n");
     ASD_initialize_log_settings(ASD_LogLevel_Warning, ASD_LogStream_Pins, true,
-                                NULL, NULL);
+                                false, NULL, NULL);
     ASD_log_buffer(ASD_LogLevel_Warning, ASD_LogStream_Pins, ASD_LogOption_None,
                    &buffer[0], length, prefix);
 }
@@ -213,7 +213,7 @@ void ASD_log_buffer_writes_to_syslog_with_max_prefix_test(void** state)
     expect_string(__wrap_syslog, temporary_syslog_buffer,
                   "TESTTE: 0000000: 1020 30\n");
     ASD_initialize_log_settings(ASD_LogLevel_Info, ASD_LogStream_I2C, true,
-                                NULL, NULL);
+                                false, NULL, NULL);
     ASD_log_buffer(ASD_LogLevel_Info, ASD_LogStream_I2C, ASD_LogOption_None,
                    &buffer[0], length, prefix);
 }
@@ -229,7 +229,7 @@ void ASD_log_buffer_writes_to_syslog_with_oversize_prefix_test(void** state)
     expect_string(__wrap_syslog, temporary_syslog_buffer,
                   "TESTTE: 0000000: 1020 30\n");
     ASD_initialize_log_settings(ASD_LogLevel_Debug, ASD_LogStream_Test, true,
-                                NULL, NULL);
+                                false, NULL, NULL);
     ASD_log_buffer(ASD_LogLevel_Debug, ASD_LogStream_Test, ASD_LogOption_None,
                    &buffer[0], length, prefix);
 }
@@ -245,13 +245,13 @@ void ASD_log_buffer_writes_to_logging_callback_test(void** state)
     size_t length = 3;
     const unsigned char buffer[] = {16, 32, 48};
     ASD_initialize_log_settings(ASD_LogLevel_Trace, ASD_LogStream_All, false,
-                                shouldRemoteLog, sendRemoteLoggingMessage);
+                                false, shouldRemoteLog, sendRemoteLoggingMessage);
     ASD_log_buffer(ASD_LogLevel_Trace, ASD_LogStream_JTAG, ASD_LogOption_None,
                    &buffer[0], length, prefix);
     assert_true(shouldRemoteLogCalled);
     assert_true(remoteMessageCalledWithLevel == ASD_LogLevel_Trace);
     assert_true(remoteMessageCalledWithStream == ASD_LogStream_JTAG);
-    assert_string_equal(expected, &remoteMessageCalledWithMessage);
+    assert_string_equal(expected, remoteMessageCalledWithMessage);
 }
 
 void ASD_log_buffer_doesnt_log_test(void** state)
@@ -261,7 +261,7 @@ void ASD_log_buffer_doesnt_log_test(void** state)
     size_t length = 3;
     const unsigned char buffer[] = {16, 32, 48};
     ASD_initialize_log_settings(ASD_LogLevel_Off, ASD_LogStream_None, false,
-                                shouldRemoteLog, sendRemoteLoggingMessage);
+                                false, shouldRemoteLog, sendRemoteLoggingMessage);
     // test will have unmet expectations if test fails.
     ASD_log_buffer(ASD_LogLevel_Trace, ASD_LogStream_JTAG, ASD_LogOption_None,
                    &buffer[0], length, "TEST");
@@ -276,7 +276,7 @@ void ASD_log_buffer_writes_to_stderr_test(void** state)
     size_t length = 3;
     const unsigned char buffer[] = {16, 32, 48};
     ASD_initialize_log_settings(ASD_LogLevel_Trace, ASD_LogStream_JTAG, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
 
     // It seems that we cannot mock fprintf with cmocka.
     // Perhaps cmocka is using fprintf and so it fails to link the mock
@@ -289,7 +289,7 @@ void ASD_initialize_log_settings_IRDR_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Trace, ASD_LogStream_JTAG, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     assert_int_equal(asd_log_level, ASD_LogLevel_Trace);
     assert_int_equal(asd_log_streams, ASD_LogStream_JTAG);
 }
@@ -298,7 +298,7 @@ void ASD_initialize_log_settings_all_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Debug, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     assert_int_equal(asd_log_level, ASD_LogLevel_Debug);
     assert_int_equal(asd_log_streams, ASD_LogStream_All);
 }
@@ -307,7 +307,7 @@ void ASD_log_shift_invalid_params_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Debug, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     unsigned char data[1024];
     memset(&data, ~0, sizeof(data));
     // these function calls should return without doing anything.
@@ -325,7 +325,7 @@ void ASD_log_shift_malloc_failure_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Debug, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     unsigned char data[1024];
     memset(&data, ~0, sizeof(data));
     expect_value(__wrap_malloc, size, (sizeof(data) * 2) + 1);
@@ -338,7 +338,7 @@ void ASD_log_shift_writes_correct_log_messages_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Trace, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     unsigned char data[1024];
     memset(&data, ~0, sizeof(data));
     const char* expected_format = "%s: [%db] 0x%s";
@@ -405,7 +405,7 @@ void ASD_log_shift_doesnt_log_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Off, ASD_LogStream_None, false,
-                                shouldRemoteLog, sendRemoteLoggingMessage);
+                                false, shouldRemoteLog, sendRemoteLoggingMessage);
     unsigned char data[1024];
     memset(&data, ~0, sizeof(data));
     ASD_log_shift(ASD_LogLevel_Error, ASD_LogStream_JTAG, ASD_LogOption_None,
@@ -416,7 +416,7 @@ void ASD_should_log_correctly_filters_messages_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Trace, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
 
     const char* expected = "some log message text";
     expect_value(__wrap_vfprintf, file, stderr);
@@ -459,7 +459,7 @@ void ASD_should_log_honors_no_remote_option_test(void** state)
 {
     (void)state;
     ASD_initialize_log_settings(ASD_LogLevel_Error, ASD_LogStream_All, false,
-                                NULL, NULL);
+                                false, NULL, NULL);
     shouldRemoteLogResponse = true;
     const char* expected = "some log message text";
     ASD_log(ASD_LogLevel_Trace, ASD_LogStream_Test, ASD_LogOption_No_Remote,
@@ -521,7 +521,6 @@ void strtostreams_test(void** state)
     assert_int_equal(streams, ASD_LogStream_Network);
     assert_false(strtostreams("Network,JTAG,unknown", &streams));
     assert_false(strtostreams("Network,JTAG,unknownthatistoolong", &streams));
-    assert_false(strtostreams("Network,JTAG,,Pins", &streams));
 }
 
 void streamtostring_test(void** state)

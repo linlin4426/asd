@@ -64,7 +64,7 @@ SPP_Handler* SPPHandler(bus_config* config)
         return NULL;
     }
 
-    SPP_Handler* state = (SPP_Handler*)malloc(sizeof(SPP_Handler));
+    SPP_Handler* state = (SPP_Handler*)calloc(1, sizeof(SPP_Handler));
     if (state == NULL)
     {
         ASD_log(ASD_LogLevel_Error, stream, option,
@@ -121,6 +121,10 @@ STATUS spp_deinitialize(SPP_Handler* state)
 
 STATUS spp_send(SPP_Handler* state, uint16_t size, uint8_t * write_buffer)
 {
+    if (size == 0 || write_buffer == NULL)
+    {
+        return ST_ERR;
+    }
     uint8_t send_data = write_buffer[0];
     ASD_log(ASD_LogLevel_Info, stream, option, "ASD spp_send[%d] - 0x%x",
             state->device_index, send_data);
@@ -185,7 +189,8 @@ STATUS spp_receive_autocommand(SPP_Handler* state, uint16_t* size, uint8_t* read
                 {
                     ASD_log(ASD_LogLevel_Error, stream, option,
                             "Received data size exceeds buffer size");
-                    *size = BUFFER_SIZE_MAX;
+                    *size = 0;
+                    return ST_ERR;
                 }
                 else if (
                     (event_buffer[0] == SPP_IBI_STATUS_CHANGED) &&
@@ -247,7 +252,7 @@ STATUS spp_receive(SPP_Handler* state, uint16_t* size, uint8_t* read_buffer)
             send_reset_rx(state);
             fail_read_counter=0;
         }
-        return ST_OK;
+        return ST_ERR;
     }
 }
 

@@ -37,8 +37,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/socket.h>
 #include <syslog.h>
 
-#include "../config.h"
-#include "../logging.h"
+#include "config.h"
+#include "logging.h"
 #include "cmocka.h"
 
 // static char temporary_log_buffer[512];
@@ -60,29 +60,35 @@ void __wrap_ASD_log(ASD_LogLevel level, ASD_LogStream stream,
 void set_config_defaults_failed_test(void** state)
 {
     config config_obj;
-    i2c_options i2c;
-    assert_int_equal(set_config_defaults(NULL, NULL), ST_ERR);
-    assert_int_equal(set_config_defaults(NULL, &i2c), ST_ERR);
-    assert_int_equal(set_config_defaults(&config_obj, NULL), ST_ERR);
+    bus_options busopt;
+    timeout_config tmo_cfg;
+    assert_int_equal(set_config_defaults(NULL, NULL, NULL), ST_ERR);
+    assert_int_equal(set_config_defaults(NULL, &busopt, &tmo_cfg), ST_ERR);
+    assert_int_equal(set_config_defaults(&config_obj, NULL, &tmo_cfg), ST_ERR);
+    assert_int_equal(set_config_defaults(&config_obj, &busopt, NULL), ST_ERR);
 }
 
 void set_config_defaults_enabled_i2c_test(void** state)
 {
     config config_obj;
-    i2c_options i2c;
-    i2c.enable = true;
-    i2c.bus = 4;
+    bus_options busopt;
+    timeout_config tmo_cfg;
+    memset(&busopt, 0, sizeof(busopt));
+    memset(&tmo_cfg, 0, sizeof(tmo_cfg));
+    busopt.enable_i2c = true;
+    busopt.bus = 4;
+    busopt.bus_config_type[4] = BUS_CONFIG_I2C;
 
-    STATUS status = set_config_defaults(&config_obj, &i2c);
+    STATUS status = set_config_defaults(&config_obj, &busopt, &tmo_cfg);
     assert_int_equal(status, ST_OK);
-    assert_true(config_obj.i2c.enable_i2c);
-    assert_int_equal(config_obj.i2c.default_bus, 4);
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
+    assert_true(config_obj.buscfg.enable_i2c);
+    assert_int_equal(config_obj.buscfg.default_bus, 4);
+    for (int i = 0; i < MAX_IxC_BUSES + MAX_SPP_BUSES; i++)
     {
         if (i == 4)
-            assert_true(config_obj.i2c.allowed_buses[i]);
+            assert_int_equal(config_obj.buscfg.bus_config_type[i], BUS_CONFIG_I2C);
         else
-            assert_false(config_obj.i2c.allowed_buses[i]);
+            assert_int_equal(config_obj.buscfg.bus_config_type[i], BUS_CONFIG_NOT_ALLOWED);
     }
 }
 

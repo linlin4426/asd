@@ -208,7 +208,10 @@ STATUS i3c_ibi_handler(SPP_Handler* state, int fd, uint8_t* ibi_buffer,
         else if (*ibi_len >= 2 && state->bulk_mode &&
             (ibi_buffer[0] == SPP_IBI_DATA_READY) &&
             (ibi_buffer[1] == SPP_IBI_SUBREASON_BUFFER_THRESHOLD)) {
-            state->bulk_autocmd_count[state->device_index]--;
+            if (state->bulk_autocmd_count[device_index] > 0)
+            {
+                state->bulk_autocmd_count[device_index]--;
+            }
         }
     }
     return ST_OK;

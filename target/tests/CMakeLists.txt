@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 2.8)
 
 #
 # import cmocka
+find_package(PkgConfig REQUIRED)
 find_package(cmocka REQUIRED)
 
 pkg_check_modules (SAFEC REQUIRED libsafec)
@@ -18,7 +19,7 @@ enable_testing()
 
 #
 # Include code coverage
-set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../cmake)
 include(CodeCoverage)
 
 #
@@ -35,6 +36,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
 #
 # Include local header files in project
 include_directories(".")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 
 #
 # For Unit Test specific code
@@ -44,18 +46,17 @@ add_definitions(-DUNIT_TEST_MAIN)
 # jtag_handler tests
 add_executable(jtag_handler_tests
                ../jtag_handler.c
-               jtag_handler_tests.c
-               ../mem_helper.c)
+               jtag_handler_tests.c)
 set_property(TARGET jtag_handler_tests PROPERTY C_STANDARD 99)
 add_test(jtag_handler_tests jtag_handler_tests)
 target_link_libraries(
-  jtag_handler_tests cmocka.a -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
+  jtag_handler_tests cmocka -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
 set_target_properties(
   jtag_handler_tests
   PROPERTIES
     LINK_FLAGS
     " -Wl,--wrap=malloc -Wl,--wrap=ASD_log -Wl,--wrap=ASD_log_buffer \
-        -Wl,--wrap=memcpy_safe \
+        -Wl,--wrap=_memcpy_s_chk \
         -Wl,--wrap=ASD_log_shift -Wl,--wrap=open -Wl,--wrap=ioctl"
   )
 
@@ -64,13 +65,12 @@ set_target_properties(
 add_executable(asd_msg_tests
                ../asd_msg.c
                ../i2c_msg_builder.c
-               ../vprobe_handler.c
                ../dbus_helper.c
                asd_msg_tests.c
-               ../mem_helper.c)
+               asd_msg_tests_stubs.c)
 set_property(TARGET asd_msg_tests PROPERTY C_STANDARD 99)
 add_test(asd_msg_tests asd_msg_tests)
-target_link_libraries(asd_msg_tests cmocka.a -fprofile-arcs -ftest-coverage -lsystemd -lm ${SAFEC_LIBRARIES})
+target_link_libraries(asd_msg_tests cmocka -fprofile-arcs -ftest-coverage -lsystemd -lm ${SAFEC_LIBRARIES})
 set_target_properties(
   asd_msg_tests
   PROPERTIES
@@ -83,7 +83,7 @@ set_target_properties(
         -Wl,--wrap=JTAG_get_tap_state -Wl,--wrap=JTAG_set_active_chain \
         -Wl,--wrap=TargetHandler -Wl,--wrap=target_initialize \
         -Wl,--wrap=target_deinitialize -Wl,--wrap=target_wait_sync \
-        -Wl,--wrap=memcpy_safe \
+        -Wl,--wrap=_memcpy_s_chk \
         -Wl,--wrap=target_write_event_config -Wl,--wrap=target_write \
         -Wl,--wrap=target_read -Wl,--wrap=target_wait_PRDY \
         -Wl,--wrap=target_get_fds -Wl,--wrap=target_event \
@@ -95,10 +95,10 @@ set_target_properties(
 
 #
 # gpio tests
-add_executable(gpio_tests ../gpio.c gpio_tests.c ../mem_helper.c)
+add_executable(gpio_tests ../gpio.c gpio_tests.c)
 set_property(TARGET gpio_tests PROPERTY C_STANDARD 99)
 add_test(gpio_test gpio_tests)
-target_link_libraries(gpio_tests cmocka.a -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
+target_link_libraries(gpio_tests cmocka -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
 set_target_properties(
   gpio_tests
   PROPERTIES
@@ -112,14 +112,13 @@ set_target_properties(
 # target handler tests
 add_executable(target_handler_tests
                ../target_handler.c
-               ../logging.c
+               ../../server/logging.c
                ../dbus_helper.c
-               target_handler_tests.c
-               ../mem_helper.c)
+               target_handler_tests.c)
 set_property(TARGET target_handler_tests PROPERTY C_STANDARD 99)
 add_test(target_handler_test target_handler_tests)
 target_link_libraries(
-  target_handler_tests cmocka.a -fprofile-arcs -ftest-coverage -lm -lsystemd -lgpiod ${SAFEC_LIBRARIES})
+  target_handler_tests cmocka -fprofile-arcs -ftest-coverage -lm -lsystemd -lgpiod ${SAFEC_LIBRARIES})
 set_target_properties(
   target_handler_tests
   PROPERTIES
@@ -155,12 +154,11 @@ set_target_properties(
 # dbus helper tests
 add_executable(dbus_helper_tests
                ../dbus_helper.c
-               ../mem_helper.c
                dbus_helper_tests.c)
 set_property(TARGET dbus_helper_tests PROPERTY C_STANDARD 99)
 add_test(dbus_helper_tests dbus_helper_tests)
 target_link_libraries(
-  dbus_helper_tests cmocka.a -fprofile-arcs -ftest-coverage -lm -lsystemd ${SAFEC_LIBRARIES})
+  dbus_helper_tests cmocka -fprofile-arcs -ftest-coverage -lm -lsystemd ${SAFEC_LIBRARIES})
 set_target_properties(
   dbus_helper_tests
   PROPERTIES
@@ -190,7 +188,7 @@ set_target_properties(
 add_executable(i2c_handler_tests ../i2c_handler.c i2c_handler_tests.c)
 set_property(TARGET i2c_handler_tests PROPERTY C_STANDARD 99)
 add_test(i2c_handler_test i2c_handler_tests)
-target_link_libraries(i2c_handler_tests cmocka.a -fprofile-arcs -ftest-coverage)
+target_link_libraries(i2c_handler_tests cmocka -fprofile-arcs -ftest-coverage)
 set_target_properties(
   i2c_handler_tests
   PROPERTIES
@@ -206,22 +204,68 @@ add_executable(i2c_msg_builder_tests ../i2c_msg_builder.c
 set_property(TARGET i2c_msg_builder_tests PROPERTY C_STANDARD 99)
 add_test(i2c_msg_builder_tests i2c_msg_builder_tests)
 target_link_libraries(i2c_msg_builder_tests
-                      cmocka.a
+                      cmocka
                       -fprofile-arcs
                       -ftest-coverage)
 set_target_properties(i2c_msg_builder_tests
-                      PROPERTIES LINK_FLAGS "-Wl,--wrap=ASD_log,--wrap=malloc")
+                      PROPERTIES LINK_FLAGS "-Wl,--wrap=ASD_log,--wrap=malloc,--wrap=realloc")
 #
-# Mem_Helper tests
-add_executable(mem_helper_tests mem_helper_test.c ../mem_helper.c)
-set_property(TARGET mem_helper_tests PROPERTY C_STANDARD 99)
-add_test(mem_helper_test mem_helper_tests)
-target_link_libraries(
-  mem_helper_tests cmocka.a -fprofile-arcs -ftest-coverage -lm)
-set_target_properties(mem_helper_tests
-                      PROPERTIES LINK_FLAGS "-Wl,--wrap=ASD_log")
+
 #
+# spp_handler tests
+add_executable(spp_handler_tests
+               ../spp_handler.c
+               spp_handler_tests.c)
+set_property(TARGET spp_handler_tests PROPERTY C_STANDARD 99)
+add_test(spp_handler_tests spp_handler_tests)
+target_link_libraries(spp_handler_tests cmocka -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
+set_target_properties(
+  spp_handler_tests
+  PROPERTIES
+    LINK_FLAGS
+    "-Wl,--wrap=ASD_log -Wl,--wrap=ASD_log_buffer \
+        -Wl,--wrap=receive_i3c -Wl,--wrap=send_i3c_action \
+        -Wl,--wrap=send_i3c_opcode -Wl,--wrap=send_i3c_cmd"
+  )
+
+#
+# i3c_handler tests
+add_executable(i3c_handler_tests
+               ../i3c_handler.c
+               i3c_handler_tests.c)
+set_property(TARGET i3c_handler_tests PROPERTY C_STANDARD 99)
+add_test(i3c_handler_tests i3c_handler_tests)
+target_link_libraries(i3c_handler_tests cmocka -fprofile-arcs -ftest-coverage -lm -lsystemd ${SAFEC_LIBRARIES})
+set_target_properties(
+  i3c_handler_tests
+  PROPERTIES
+    LINK_FLAGS
+    "-Wl,--wrap=ASD_log -Wl,--wrap=ASD_log_buffer \
+        -Wl,--wrap=dbus_helper -Wl,--wrap=dbus_initialize \
+        -Wl,--wrap=dbus_deinitialize -Wl,--wrap=dbus_rel_i3c_ownership \
+        -Wl,--wrap=dbus_req_i3c_ownership -Wl,--wrap=dbus_read_i3c_ownership \
+        -Wl,--wrap=sd_bus_get_fd"
+  )
+
+#
+# vprobe_handler tests
+add_executable(vprobe_handler_tests
+               ../vprobe_handler.c
+               vprobe_handler_tests.c)
+set_property(TARGET vprobe_handler_tests PROPERTY C_STANDARD 99)
+target_compile_options(vprobe_handler_tests PRIVATE -Wno-format)
+add_test(vprobe_handler_tests vprobe_handler_tests)
+target_link_libraries(vprobe_handler_tests cmocka -fprofile-arcs -ftest-coverage -lm ${SAFEC_LIBRARIES})
+set_target_properties(
+  vprobe_handler_tests
+  PROPERTIES
+    LINK_FLAGS
+    "-Wl,--wrap=ASD_log -Wl,--wrap=ASD_log_buffer \
+        -Wl,--wrap=dbus_helper -Wl,--wrap=dbus_deinitialize"
+  )
+
+
 # Coverage settings
 set(COVERAGE_EXCLUDES '*/tests/*')
 
-setup_target_for_coverage(NAME test_coverage EXECUTABLE ctest)
+setup_target_for_coverage(NAME test_coverage_target EXECUTABLE ctest)

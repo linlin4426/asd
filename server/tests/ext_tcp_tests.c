@@ -39,7 +39,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "../ext_network.h"
 #include "../ext_tcp.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 // static char temporary_log_buffer[512];

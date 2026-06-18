@@ -183,7 +183,12 @@ STATUS dbus_power_toggle(Dbus_Handle* state)
             &error, &reply, "s");
         if (retcode >= 0)
         {
-            sd_bus_message_read(reply, "s", &value);
+            if (sd_bus_message_read(reply, "s", &value) < 0)
+            {
+                sd_bus_error_free(&error);
+                sd_bus_message_unref(reply);
+                return ST_ERR;
+            }
             strcmp_s(value, MAX_PLATFORM_PATH_SIZE, POWER_ON_PROPERTY_CHASSIS,
                      &cmp);
             if (cmp == 0)
@@ -220,14 +225,24 @@ STATUS dbus_get_powerstate(Dbus_Handle* state, int* value)
                 &error, &reply, "s");
             if (retcode >= 0)
             {
-                sd_bus_message_read(reply, "s", &value_string);
-                if (strncmp(value_string, POWER_ON_PROPERTY_CHASSIS,
+                if (sd_bus_message_read(reply, "s", &value_string) < 0)
+                {
+                    ASD_log(ASD_LogLevel_Error, stream, option,
+                            "sd_bus_message_read failed");
+                    result = ST_ERR;
+                }
+                else if (strncmp(value_string, POWER_ON_PROPERTY_CHASSIS,
                             strnlen_s(POWER_ON_PROPERTY_CHASSIS,
                                       MAX_PLATFORM_PATH_SIZE)) == 0)
+                {
                     *value = STATE_ON;
+                    result = ST_OK;
+                }
                 else
+                {
                     *value = STATE_OFF;
-                result = ST_OK;
+                    result = ST_OK;
+                }
             }
             else
             {
@@ -366,7 +381,8 @@ int match_callback(sd_bus_message* msg, void* userdata, sd_bus_error* error)
                          GET_POWER_STATE_PROPERTY_CHASSIS, &cmp);
                 if (cmp != 0)
                 {
-                    result = ST_ERR;
+                    sd_bus_message_skip(msg, "v");
+                    sd_bus_message_exit_container(msg);
                     continue;
                 }
                 retcode = sd_bus_message_enter_container(
@@ -391,6 +407,8 @@ int match_callback(sd_bus_message* msg, void* userdata, sd_bus_error* error)
                 {
                     result = ST_OK;
                 }
+                sd_bus_message_exit_container(msg);
+                sd_bus_message_exit_container(msg);
             }
             if (result == ST_OK)
             {
@@ -664,7 +682,10 @@ STATUS dbus_read_asd_config(const Dbus_Handle* state, const char* interface,
             {
                 if (str != NULL)
                 {
-                    strcpy_s(var, MAX_PLATFORM_PATH_SIZE, str);
+                    if (strcpy_s(var, MAX_PLATFORM_PATH_SIZE, str))
+                    {
+                        result = ST_ERR;
+                    }
                     free(str);
                     str = NULL;
                 }
@@ -717,7 +738,8 @@ STATUS dbus_get_asd_interface_paths(const Dbus_Handle* state,
             ASD_log(ASD_LogLevel_Error, stream, option,
                     "sd_bus_call failed: %d", retcode);
 #endif
-            return ST_ERR;
+            result = ST_ERR;
+            break;
         }
 
         retcode = sd_bus_message_peek_type(reply, &type, &contents);
@@ -727,7 +749,8 @@ STATUS dbus_get_asd_interface_paths(const Dbus_Handle* state,
             ASD_log(ASD_LogLevel_Error, stream, option,
                     "Failed to get peek type: %d", retcode);
 #endif
-            return ST_ERR;
+            result = ST_ERR;
+            break;
         }
 
         retcode = sd_bus_message_enter_container(reply, type, contents);
@@ -737,18 +760,24 @@ STATUS dbus_get_asd_interface_paths(const Dbus_Handle* state,
             ASD_log(ASD_LogLevel_Error, stream, option,
                     "Failed to enter container: %d", retcode);
 #endif
-            return ST_ERR;
+            result = ST_ERR;
+            break;
         }
         retcode = sd_bus_message_read(reply, "s", &str);
         if (retcode < 0)
         {
             ASD_log(ASD_LogLevel_Error, stream, option,
                     "Failed to read string inside dictionary: %d", retcode);
-            return ST_ERR;
+            result = ST_ERR;
+            break;
         }
         if (str != NULL)
         {
-            strcpy_s((char*)&interfaces[i], MAX_PLATFORM_PATH_SIZE, interface);
+            if (strcpy_s(interfaces[i], MAX_PLATFORM_PATH_SIZE, interface))
+            {
+                result = ST_ERR;
+                break;
+            }
             ASD_log(ASD_LogLevel_Info, stream, option, "found interface[%d] %s",
                     i, interfaces[i]);
         }
@@ -757,11 +786,18 @@ STATUS dbus_get_asd_interface_paths(const Dbus_Handle* state,
         {
             ASD_log(ASD_LogLevel_Error, stream, option,
                 "Failed to exit container: %d", retcode);
-            return ST_ERR;
+            result = ST_ERR;
+            break;
         }
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        reply = NULL;
+        error = (sd_bus_error)SD_BUS_ERROR_NULL;
     }
 
-    return ST_OK;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    return result;
 }
 
 STATUS dbus_get_platform_bus_config(const Dbus_Handle* state,
@@ -1073,4 +1109,48 @@ STATUS dbus_rel_i3c_ownership(const Dbus_Handle* state, int token)
     sd_bus_error_free(&error);
     sd_bus_message_unref(reply);
     return ST_OK;
+}
+
+STATUS dbus_get_chain_select_delay(const Dbus_Handle* state,
+                                   uint32_t* delay_us)
+{
+    STATUS result = ST_OK;
+    int retcode = 0;
+    uint64_t val = 0;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    static char path[MAX_PLATFORM_PATH_SIZE] = {0};
+
+    if ((state == NULL) || (delay_us == NULL))
+    {
+        return ST_ERR;
+    }
+
+    if (path[0] == '\0')
+    {
+        result = dbus_get_path(state, ASD_CONFIG_PATH, path);
+        if (result != ST_OK)
+        {
+            ASD_log(ASD_LogLevel_Info, stream, option,
+                    "ASD config path not found, ChainSelectDelayUs disabled");
+            path[0] = '\0';
+            return ST_ERR;
+        }
+    }
+
+    retcode = sd_bus_get_property_trivial(
+        state->bus, ENTITY_MANAGER_SERVICE, path, ASD_CONFIG_PATH,
+        "ChainSelectDelayUs", &error, 't', &val);
+    if (retcode < 0)
+    {
+        ASD_log(ASD_LogLevel_Info, stream, option,
+                "ChainSelectDelayUs property not found on dbus");
+        result = ST_ERR;
+    }
+    else
+    {
+        *delay_us = (uint32_t)val;
+    }
+
+    sd_bus_error_free(&error);
+    return result;
 }

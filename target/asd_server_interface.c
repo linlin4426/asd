@@ -109,11 +109,13 @@ STATUS asd_api_server_ioctl(void* input, void* output, unsigned int cmd)
 void asd_api_server_log(ASD_LogLevel level, ASD_LogStream stream,
                         ASD_LogOption options, const char* format, ...)
 {
-    char string[MAX_LOG_SIZE];
+    char string[MAX_LOG_SIZE] = {0};
     va_list args;
     va_start(args, format);
-    vsprintf_s(string, sizeof(string), format, args);
-    asd_server_log(level, stream, options, string);
+    if (vsprintf_s(string, sizeof(string), format, args) >= 0)
+    {
+        asd_server_log(level, stream, options, string);
+    }
     va_end( args );
 }
 

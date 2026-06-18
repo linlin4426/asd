@@ -180,16 +180,15 @@ STATUS JTAG_set_padding(JTAG_Handler* state, const JTAGPaddingTypes padding,
     if (state == NULL)
         return ST_ERR;
 
-    if ((padding == JTAGPaddingTypes_DRPre ||
-         padding == JTAGPaddingTypes_DRPost) &&
-        value > DRMAXPADSIZE)
+    // Validate padding value against array bounds (padDataOne/padDataZero)
+    if (value > IRMAXPADSIZE)
     {
         return ST_ERR;
     }
 
-    if ((padding == JTAGPaddingTypes_IRPre ||
-         padding == JTAGPaddingTypes_IRPost) &&
-        value > IRMAXPADSIZE)
+    if ((padding == JTAGPaddingTypes_DRPre ||
+         padding == JTAGPaddingTypes_DRPost) &&
+        value > DRMAXPADSIZE)
     {
         return ST_ERR;
     }
@@ -441,7 +440,7 @@ STATUS JTAG_shift_hw(JTAG_Handler* state, unsigned int number_of_bits,
     }
     else
     {
-        if (memcpy_s(tdio, DIV_ROUND_UP(number_of_bits, BITS_PER_BYTE), input,
+        if (memcpy_s(tdio, sizeof(tdio), input,
                      DIV_ROUND_UP(number_of_bits, BITS_PER_BYTE)))
         {
             ASD_log(ASD_LogLevel_Error, stream, option,
@@ -531,7 +530,7 @@ STATUS perform_shift(JTAG_Handler* state, unsigned int number_of_bits,
     }
     else
     {
-        if (memcpy_s(tdio, DIV_ROUND_UP(number_of_bits, BITS_PER_BYTE), input,
+        if (memcpy_s(tdio, sizeof(tdio), input,
                      DIV_ROUND_UP(number_of_bits, BITS_PER_BYTE)))
         {
             ASD_log(ASD_LogLevel_Error, stream, option,

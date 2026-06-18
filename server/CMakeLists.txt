@@ -27,3 +27,7 @@ if(NOT ${BUILD_UT})
         RENAME asd
     )
 endif(NOT ${BUILD_UT})
+
+if(${BUILD_UT})
+    add_subdirectory(tests)
+endif()

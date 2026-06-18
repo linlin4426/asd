@@ -110,9 +110,9 @@ void ASD_log(ASD_LogLevel level, ASD_LogStream stream, ASD_LogOption options,
         }
         if (remoteLog)
         {
-            snprintf(&log_buffer[LOG_TIMESTAMP_LENGTH -1],
-                     CALLBACK_LOG_MESSAGE_LENGTH - LOG_TIMESTAMP_LENGTH,
-                     format, args);
+            vsnprintf(&log_buffer[LOG_TIMESTAMP_LENGTH -1],
+                      CALLBACK_LOG_MESSAGE_LENGTH - LOG_TIMESTAMP_LENGTH,
+                      format, args);
             loggingCallback(level, stream, log_buffer);
         }
         va_end(args);
@@ -135,7 +135,7 @@ void ASD_log(ASD_LogLevel level, ASD_LogStream stream, ASD_LogOption options,
         }
         if (remoteLog)
         {
-            snprintf(log_buffer, CALLBACK_LOG_MESSAGE_LENGTH, format, args);
+            vsnprintf(log_buffer, CALLBACK_LOG_MESSAGE_LENGTH, format, args);
             loggingCallback(level, stream, log_buffer);
         }
         va_end(args);
@@ -206,9 +206,11 @@ void buffer_to_hex(unsigned int number_of_bits, unsigned int number_of_bytes,
     unsigned int i = 0;
 
     int last_bit_mask = (0xff >> (8 - (number_of_bits % 8)));
-    if (last_bit_mask != 0 &&
-        (buffer[number_of_bytes] & last_bit_mask) >> 4 == 0)
+    if (number_of_bytes > 0 && last_bit_mask != 0 &&
+        (buffer[number_of_bytes - 1] & last_bit_mask) >> 4 == 0)
+    {
         result_index--;
+    }
 
     for (i = 0; i < number_of_bytes; ++i)
     {

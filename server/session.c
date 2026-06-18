@@ -184,6 +184,7 @@ STATUS session_open(Session* state, extnet_conn_t* p_extconn)
             }
             p_sess->t_auth_tout = SESSION_AUTH_EXPIRE_TIMEOUT + time(0);
             p_sess->b_authenticated = false;
+            p_sess->b_data_pending = false;
 #ifdef ENABLE_DEBUG_LOGGING
             ASD_log(ASD_LogLevel_Debug, ASD_LogStream_Network,
                     ASD_LogOption_None, "opened session %d fd %d", p_sess->id,

@@ -46,3 +46,7 @@ if(NOT ${BUILD_UT})
             ${SPP_HANDLER} asd_target_api.c asd_server_interface.c)
     target_link_libraries(asd_target -lm -lsystemd -lgpiod)
 endif(NOT ${BUILD_UT})
+
+if(${BUILD_UT})
+    add_subdirectory(tests)
+endif()

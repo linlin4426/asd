@@ -1180,14 +1180,19 @@ STATUS on_client_connect(asd_state* state, extnet_conn_t* p_extcon)
         result = asd_api_target_ioctl(NULL, &target_bus_options,
                                       IOCTL_TARGET_GET_I2C_I3C_BUS_CONFIG);
 
-#ifdef ENABLE_DEBUG_LOGGING
         if (result != ST_OK)
         {
+#ifdef ENABLE_DEBUG_LOGGING
             ASD_log(ASD_LogLevel_Warning, ASD_LogStream_Daemon,
                     ASD_LogOption_No_Remote,
                     "Failed to read i2c/i3c platform config");
-        }
 #endif
+            // Non-fatal: proceed with all buses disabled (JTAG-only).
+            // target_bus_options is already initialized to
+            // BUS_CONFIG_NOT_ALLOWED by target_get_i2c_i3c_config.
+            result = ST_OK;
+        }
+
         if (state->args.busopt.enable_i2c || state->args.busopt.enable_i3c ||
             state->args.busopt.enable_spp)
         {

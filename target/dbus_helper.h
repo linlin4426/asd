@@ -115,6 +115,7 @@ int sdbus_callback(sd_bus_message* reply, void* userdata, sd_bus_error* error);
 STATUS dbus_process_event(Dbus_Handle* state, ASD_EVENT* event);
 STATUS dbus_get_powerstate(Dbus_Handle* state, int* value);
 STATUS dbus_get_platform_path(const Dbus_Handle* state, char* path);
+STATUS dbus_get_path(const Dbus_Handle* state, char* name, char* path);
 STATUS dbus_get_platform_id(const Dbus_Handle* state, uint64_t* pid);
 STATUS dbus_read_asd_config(const Dbus_Handle* state, const char* interface,
                             const char* name, char type, void* var);
@@ -127,6 +128,8 @@ STATUS dbus_get_platform_bus_config(const Dbus_Handle* state,
 STATUS dbus_read_i3c_ownership(const Dbus_Handle* state, I3c_Ownership* owner);
 STATUS dbus_req_i3c_ownership(const Dbus_Handle* state, int* token);
 STATUS dbus_rel_i3c_ownership(const Dbus_Handle* state, int token);
+STATUS dbus_get_chain_select_delay(const Dbus_Handle* state,
+                                   uint32_t* delay_us);
 int match_callback(sd_bus_message* m, void* userdata, sd_bus_error* error);
 
 #endif

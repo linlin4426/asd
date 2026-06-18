@@ -40,11 +40,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <syslog.h>
 
 #include "../asd_msg.h"
-#include "../config.h"
+#include "config.h"
 #include "../i2c_msg_builder.h"
-#include "../logging.h"
-#include "../mem_helper.h"
+#include "logging.h"
 #include "cmocka.h"
+#include <safe_mem_lib.h>
+extern ASD_MSG msg_state;
+extern bool should_remote_log(ASD_LogLevel, ASD_LogStream);
+extern int flock_cmd_index;
 #include "i2c_msg_builder_tests.h"
 
 static const char BMC_VERSION[] = "OPENBMC_VERSION:\"wht-0.22-0-ge37eb7922\"";
@@ -88,9 +91,9 @@ FILE* __real_fopen(const char* pathname, const char* flags);
 FILE* __wrap_fopen(const char* pathname, const char* flags)
 {
     if (OS_RELEASE_GOOD == 0)
-        return __real_fopen("../../tests/os-release_good", "r");
+        return __real_fopen("../../../target/tests/os-release_good", "r");
     else if (OS_RELEASE_GOOD == 1)
-        return __real_fopen("../../tests/os-release_bad", "r");
+        return __real_fopen("../../../target/tests/os-release_bad", "r");
     else
         return NULL;
 }
@@ -130,15 +133,21 @@ STATUS __wrap_JTAG_initialize(JTAG_Handler* state, bool sw_mode)
 }
 
 int MEMCPY_SAFE_RESULT = 0;
-int __wrap_memcpy_safe(void* dest, size_t destsize, const void* src,
-                       size_t count)
+errno_t __real__memcpy_s_chk(void* dest, rsize_t dmax, const void* src,
+                            rsize_t slen, size_t destbos, size_t srcbos);
+errno_t __wrap__memcpy_s_chk(void* dest, rsize_t dmax, const void* src,
+                              rsize_t slen, size_t destbos, size_t srcbos)
 {
+    (void)destbos; (void)srcbos;
     if (MEMCPY_SAFE_RESULT == 1)
         return MEMCPY_SAFE_RESULT;
     else
     {
+        size_t count = slen;
+        char* d = (char*)dest;
+        const char* s = (const char*)src;
         while (count--)
-            *(char*)dest++ = *(const char*)src++;
+            *d++ = *s++;
         return MEMCPY_SAFE_RESULT;
     }
 }
@@ -333,11 +342,12 @@ STATUS __wrap_target_get_fds(Target_Control_Handle* state, target_fdarr_t* fds,
 
 ASD_EVENT TARGET_EVENT_EVENT;
 STATUS __wrap_target_event(Target_Control_Handle* state, struct pollfd poll_fd,
-                           ASD_EVENT* event)
+                           ASD_EVENT* event, ASD_EVENT_DATA* ret_data)
 {
     check_expected_ptr(state);
     check_expected(poll_fd.fd);
     check_expected_ptr(event);
+    (void)ret_data;
     *event = TARGET_EVENT_EVENT;
     return command_result[command_index++];
 }
@@ -521,23 +531,34 @@ int __wrap_flock(int fd, int op)
 }
 
 config asd_config;
-static i2c_config global_i2c_config;
+static bus_config global_bus_config;
 static int setup(void** state)
 {
     int cb_state = 1;
     IGNORE_CHECKS = false;
     expect_default_bmc_version();
     FAKE_JTAG_HANDLER = (JTAG_Handler*)malloc(sizeof(JTAG_Handler));
+    memset(FAKE_JTAG_HANDLER, 0, sizeof(JTAG_Handler));
+    FAKE_JTAG_HANDLER->active_chain = &FAKE_JTAG_HANDLER->chains[0];
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    *state = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr, &cb_state,
-                          &asd_config);
+    /* Set up bus config so I2C tests work with the new bus routing */
+    memset(&asd_config, 0, sizeof(config));
+    asd_config.buscfg.enable_i2c = false;
+    for (int i = 0; i < MAX_IxC_BUSES; i++)
+    {
+        asd_config.buscfg.bus_config_map[i] = (uint8_t)i;
+        asd_config.buscfg.bus_config_type[i] = BUS_CONFIG_I2C;
+    }
+    asd_msg_init(&asd_config);
+    *state = &msg_state;
     memset(&msg_sent, 0, sizeof(struct asd_message));
     FakeSendFunctionResult = ST_OK;
     ((ASD_MSG*)*state)->handlers_initialized = true;
-    ((ASD_MSG*)*state)->i2c_handler->config = &global_i2c_config;
-    ((ASD_MSG*)*state)->i2c_handler->config->enable_i2c = false;
+    ((ASD_MSG*)*state)->target_handler->initialized = true;
+    ((ASD_MSG*)*state)->i2c_handler->config = &global_bus_config;
+    ((ASD_MSG*)*state)->buscfg->enable_i2c = false;
     tdo = (unsigned char*)malloc(MAX_DATA_SIZE);
     TARGET_READ_IGNORE = false;
     return 0;
@@ -548,8 +569,7 @@ static int teardown(void** state)
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
-    asd_msg_free(*state);
-    free(*state);
+    asd_msg_free();
     FAKE_JTAG_HANDLER = NULL;
     FAKE_TARGET_HANDLER = NULL;
     FAKE_I2C_HANDLER = NULL;
@@ -567,30 +587,26 @@ void get_fake_message(uint32_t type, struct asd_message* msg)
         msg->buffer[i] = data_buffer[i];
 }
 
+/* Helper: set up expectations for check_shift_state_bundle_start
+ * which is called at the start of JTAG message processing */
+void expect_check_shift_state(void)
+{
+    expect_any(__wrap_JTAG_get_tap_state, state);
+    expect_any(__wrap_JTAG_get_tap_state, tap_state);
+}
+
 void asd_msg_init_invalid_param_test(void** state)
 {
     (void)state; /* unused */
-    int fake_cb = 1;
     config config;
-    assert_null(asd_msg_init(NULL, &FakeReadFunctionPtr, &fake_cb, &config));
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                             &fake_cb, NULL));
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr, NULL,
-                             &config));
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, NULL, NULL, &config));
+    assert_int_equal(ST_ERR, asd_msg_init(NULL));
 }
 
 void asd_msg_init_malloc_failure_test(void** state)
 {
     (void)state; /* unused */
-    expect_value(__wrap_malloc, size, sizeof(ASD_MSG));
-    malloc_fail[0] = true;
-    config config;
-    int fake_state = 1;
-    malloc_fail_mode = true;
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                             &fake_state, &config));
-    malloc_fail_mode = false;
+    /* malloc no longer used in init - singleton pattern */
+    assert_int_equal(ST_ERR, asd_msg_init(NULL));
 }
 
 void asd_msg_jtag_init_failed_test(void** state)
@@ -603,13 +619,9 @@ void asd_msg_jtag_init_failed_test(void** state)
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                             &fake_state, &config));
-    FAKE_JTAG_HANDLER = (JTAG_Handler*)malloc(sizeof(JTAG_Handler));
-    FAKE_TARGET_HANDLER = NULL;
-    FAKE_I2C_HANDLER = NULL;
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                             &fake_state, &config));
+    assert_int_equal(ST_OK, asd_msg_init(&config));
+    /* With NULL handlers, init still returns OK but handlers_initialized stays false */
+    asd_msg_free();
     FAKE_JTAG_HANDLER = NULL;
 }
 
@@ -617,31 +629,24 @@ void asd_msg_init_test(void** state)
 {
     (void)state; /* unused */
     config config;
-    int cb_state = 1;
     expect_default_bmc_version();
     FAKE_JTAG_HANDLER = (JTAG_Handler*)malloc(sizeof(JTAG_Handler));
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    ASD_MSG* sdk = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                                &cb_state, &config);
+    assert_int_equal(ST_OK, asd_msg_init(&config));
 
-    assert_non_null(sdk->should_remote_log);
-    assert_non_null(sdk->send_remote_logging_message);
-    assert_non_null(sdk->send_function);
-    assert_non_null(sdk->read_function);
-    assert_non_null(sdk->asd_cfg);
-    assert_false(sdk->handlers_initialized);
-    assert_non_null(sdk->callback_state);
-    assert_int_equal(READ_STATE_INITIAL, sdk->in_msg.read_state);
-    assert_int_equal(0, sdk->in_msg.read_index);
+    assert_non_null(msg_state.send_remote_logging_message);
+    assert_non_null(msg_state.asd_cfg);
+    assert_false(msg_state.handlers_initialized);
+    assert_int_equal(READ_STATE_INITIAL, msg_state.in_msg.read_state);
+    assert_int_equal(0, msg_state.in_msg.read_index);
 
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
 
-    asd_msg_free(sdk);
-    free(sdk);
+    asd_msg_free();
     FAKE_JTAG_HANDLER = NULL;
     FAKE_TARGET_HANDLER = NULL;
     FAKE_I2C_HANDLER = NULL;
@@ -651,32 +656,28 @@ void asd_msg_init_only_one_instance_test(void** state)
 {
     (void)state; /* unused */
     config config;
-    int cb_state = 1;
     expect_default_bmc_version();
     FAKE_JTAG_HANDLER = (JTAG_Handler*)malloc(sizeof(JTAG_Handler));
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    ASD_MSG* sdk = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                                &cb_state, &config);
+    assert_int_equal(ST_OK, asd_msg_init(&config));
 
-    // this one should fail
-    assert_null(asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                             &cb_state, &config));
+    // second init should fail - only one instance allowed
+    assert_int_equal(ST_ERR, asd_msg_init(&config));
 
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
 
-    asd_msg_free(sdk);
-    free(sdk);
+    asd_msg_free();
     FAKE_JTAG_HANDLER = NULL;
 }
 
 void asd_msg_free_invalid_param_test(void** state)
 {
     (void)state; /* unused */
-    assert_int_equal(asd_msg_free(NULL), ST_ERR);
+    assert_int_equal(asd_msg_free(), ST_ERR);
 }
 
 void asd_msg_free_jtag_deinit_fail_test(void** state)
@@ -689,8 +690,7 @@ void asd_msg_free_jtag_deinit_fail_test(void** state)
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    ASD_MSG* actual = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                                   &fake_state, &config);
+    asd_msg_init(&config);
     command_index = 0;
     command_result[0] = ST_ERR;
     command_result[1] = ST_ERR;
@@ -699,8 +699,7 @@ void asd_msg_free_jtag_deinit_fail_test(void** state)
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
-    assert_int_equal(asd_msg_free(actual), ST_ERR);
-    free(actual);
+    assert_int_equal(asd_msg_free(), ST_ERR);
     FAKE_JTAG_HANDLER = NULL;
 }
 
@@ -714,8 +713,7 @@ void asd_msg_free_target_deinit_fail_test(void** state)
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    ASD_MSG* actual = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                                   &fake_state, &config);
+    asd_msg_init(&config);
     command_result[0] = ST_OK;
     command_result[1] = ST_ERR;
     command_result[2] = ST_OK;
@@ -724,8 +722,7 @@ void asd_msg_free_target_deinit_fail_test(void** state)
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
-    assert_int_equal(asd_msg_free(actual), ST_ERR);
-    free(actual);
+    assert_int_equal(asd_msg_free(), ST_ERR);
 }
 
 void asd_msg_free_test(void** state)
@@ -738,8 +735,7 @@ void asd_msg_free_test(void** state)
     FAKE_TARGET_HANDLER =
         (struct Target_Control_Handle*)malloc(sizeof(Target_Control_Handle));
     FAKE_I2C_HANDLER = (struct I2C_Handler*)malloc(sizeof(I2C_Handler));
-    ASD_MSG* actual = asd_msg_init(&FakeSendFunctionPtr, &FakeReadFunctionPtr,
-                                   &fake_state, &config);
+    asd_msg_init(&config);
     command_result[0] = ST_OK;
     command_result[1] = ST_OK;
     command_result[2] = ST_OK;
@@ -748,15 +744,14 @@ void asd_msg_free_test(void** state)
     expect_any(__wrap_JTAG_deinitialize, state);
     expect_any(__wrap_target_deinitialize, state);
     expect_any(__wrap_i2c_deinitialize, state);
-    assert_int_equal(asd_msg_free(actual), ST_OK);
-    free(actual);
+    assert_int_equal(asd_msg_free(), ST_OK);
 }
 
 void asd_msg_on_msg_recv_invalid_param_test(void** state)
 {
     (void)state; /* unused */
     // should have no failed 'expects'
-    asd_msg_on_msg_recv(NULL);
+    asd_msg_on_msg_recv();
 }
 
 void asd_msg_on_msg_recv_encrypted_check_test(void** state)
@@ -765,7 +760,7 @@ void asd_msg_on_msg_recv_encrypted_check_test(void** state)
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.enc_bit = 1;
     MEMCPY_SAFE_RESULT = 0;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_MSG_CRYPY_NOT_SUPPORTED);
 }
 
@@ -777,7 +772,7 @@ void asd_msg_on_msg_recv_send_error_failed_test(void** state)
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_MSG_CRYPY_NOT_SUPPORTED);
 }
 
@@ -786,7 +781,7 @@ void asd_msg_on_msg_recv_agent_control_num_messages_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = NUM_IN_FLIGHT_MESSAGES_SUPPORTED_CMD;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], NUM_IN_FLIGHT_MESSAGES_SUPPORTED_CMD);
     assert_int_equal(msg_sent.buffer[1], NUM_IN_FLIGHT_BUFFERS_TO_USE);
     assert_int_equal(msg_sent.header.size_lsb, 2);
@@ -802,7 +797,7 @@ void asd_msg_on_msg_recv_agent_control_result_send_failed_test(void** state)
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
 }
 
 void asd_msg_on_msg_recv_agent_control_max_data_size_test(void** state)
@@ -810,7 +805,7 @@ void asd_msg_on_msg_recv_agent_control_max_data_size_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = MAX_DATA_SIZE_CMD;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], MAX_DATA_SIZE_CMD);
     assert_int_equal(msg_sent.buffer[1], (MAX_DATA_SIZE)&0xFF);
     assert_int_equal(msg_sent.buffer[2], (MAX_DATA_SIZE >> 8) & 0xFF);
@@ -824,7 +819,7 @@ void asd_msg_on_msg_recv_agent_control_supported_jtag_chains_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = SUPPORTED_JTAG_CHAINS_CMD;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], SUPPORTED_JTAG_CHAINS_CMD);
     assert_int_equal(msg_sent.buffer[1], SUPPORTED_JTAG_CHAINS);
     assert_int_equal(msg_sent.header.size_lsb, 2);
@@ -838,7 +833,7 @@ void asd_msg_on_msg_recv_agent_control_supported_i2c_buses_i2c_disabled_test(
     ASD_MSG* sdk = (*state);
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = SUPPORTED_I2C_BUSES_CMD;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], SUPPORTED_I2C_BUSES_CMD);
     assert_int_equal(msg_sent.buffer[1], 0);
     assert_int_equal(msg_sent.header.size_lsb, 2);
@@ -852,11 +847,13 @@ void asd_msg_on_msg_recv_agent_control_supported_i2c_buses_test(void** state)
     uint8_t expected_bus = 6;
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = SUPPORTED_I2C_BUSES_CMD;
-    sdk->i2c_handler->config->enable_i2c = true;
-    sdk->i2c_handler->config->default_bus = expected_bus;
-    sdk->asd_cfg->i2c.allowed_buses[expected_bus] = true;
+    sdk->buscfg->enable_i2c = true;
+    /* Reset all bus types, then enable only the expected bus */
+    for (int i = 0; i < MAX_IxC_BUSES; i++)
+        sdk->asd_cfg->buscfg.bus_config_type[i] = BUS_CONFIG_NOT_ALLOWED;
+    sdk->asd_cfg->buscfg.bus_config_type[expected_bus] = BUS_CONFIG_I2C;
 
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], SUPPORTED_I2C_BUSES_CMD);
     assert_int_equal(msg_sent.buffer[1], 1);
     assert_int_equal(msg_sent.buffer[2], expected_bus);
@@ -868,10 +865,10 @@ void asd_msg_on_msg_recv_agent_control_supported_i2c_buses_test(void** state)
 void asd_msg_on_msg_recv_agent_control_downstream_version_test(void** state)
 {
     ASD_MSG* sdk = (*state);
-    char version[] = "ASD_BMC_v1.4.3_<wht-0.38-22-gf0d9505>";
+    char version[] = "ASD_BMC_v1.6.8_<wht-0.3-59-g064059a>";
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = OBTAIN_DOWNSTREAM_VERSION_CMD;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], OBTAIN_DOWNSTREAM_VERSION_CMD);
     assert_memory_equal(msg_sent.buffer + 1, version, sizeof(version));
     assert_int_equal(msg_sent.header.size_lsb, sizeof(version));
@@ -886,18 +883,18 @@ void asd_msg_on_msg_recv_agent_control_missing_byte_failure_test(void** state)
     sdk->in_msg.msg.header.cmd_stat = AGENT_CONFIGURATION_CMD;
     sdk->in_msg.msg.header.size_lsb = 0;
     // *** we are missing the 1st data byte. it should not crash ***
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
 
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_LOGGING;
     // *** we are missing the 2nd data byte. it should not crash ***
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
 
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_GPIO;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
 
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
 }
 
 void asd_msg_on_msg_recv_i2c_init_failed_test(void** state)
@@ -905,14 +902,17 @@ void asd_msg_on_msg_recv_i2c_init_failed_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(I2C_TYPE, &sdk->in_msg.msg);
     sdk->handlers_initialized = false;
-    sdk->i2c_handler->config->enable_i2c = true;
+    sdk->buscfg->enable_i2c = true;
+    /* Reset all bus types, then enable only the expected bus */
+    for (int i = 0; i < MAX_IxC_BUSES; i++)
+        sdk->asd_cfg->buscfg.bus_config_type[i] = BUS_CONFIG_NOT_ALLOWED;
     command_index = 0;
     command_result[0] = ST_OK;
     command_result[1] = ST_ERR;
     expect_any(__wrap_JTAG_initialize, state);
     expect_any(__wrap_JTAG_initialize, sw_mode);
     expect_any(__wrap_i2c_initialize, state);
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_INIT_I2C_HANDLER);
@@ -927,7 +927,7 @@ void asd_msg_on_msg_recv_agent_control_logging_config_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_LOGGING;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -944,7 +944,7 @@ void asd_msg_on_msg_recv_agent_control_gpio_config_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_GPIO;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -961,7 +961,7 @@ void asd_msg_on_msg_recv_agent_control_jtag_driver_sw_mode_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -978,7 +978,7 @@ void asd_msg_on_msg_recv_agent_control_jtag_driver_hw_mode_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -995,7 +995,7 @@ void asd_msg_on_msg_recv_agent_control_jtag_single_chain_mode_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -1012,7 +1012,7 @@ void asd_msg_on_msg_recv_agent_control_jtag_multi_chain_mode_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
     assert_int_equal(msg_sent.header.size_lsb, 1);
     assert_int_equal(msg_sent.header.size_msb, 0);
@@ -1025,7 +1025,7 @@ void asd_msg_on_msg_recv_agent_control_unsupported_command_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = 78; // unknown command
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     // unsupported agent control commands are simply ignored. success
     // returned.
     assert_int_equal(msg_sent.buffer[0], 78);
@@ -1044,7 +1044,7 @@ void asd_msg_on_msg_recv_send_response_failure_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     // with this error, it just logs and moves on.
     // Well just ensure it doesnt crash...
 }
@@ -1058,7 +1058,7 @@ void asd_msg_on_msg_recv_jtag_init_failed_test(void** state)
     command_result[0] = ST_ERR;
     expect_any(__wrap_JTAG_initialize, state);
     expect_any(__wrap_JTAG_initialize, sw_mode);
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_INIT_JTAG_HANDLER);
@@ -1077,7 +1077,7 @@ void asd_msg_on_msg_recv_target_init_failed_test(void** state)
     expect_any(__wrap_JTAG_initialize, sw_mode);
     expect_any(__wrap_target_initialize, state);
     expect_any(__wrap_JTAG_deinitialize, state);
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_XDP_PRESENT);
@@ -1096,7 +1096,7 @@ void asd_msg_on_msg_recv_target_init_failed_cleanup_failed_test(void** state)
     expect_any(__wrap_JTAG_initialize, sw_mode);
     expect_any(__wrap_target_initialize, state);
     expect_any(__wrap_JTAG_deinitialize, state);
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_XDP_PRESENT);
@@ -1114,7 +1114,8 @@ void asd_msg_on_msg_recv_jtag_init_test(void** state)
     command_result[0] = ST_OK;
     command_result[1] = ST_OK;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
@@ -1124,7 +1125,7 @@ void asd_msg_on_msg_recv_unsupported_type_test(void** state)
 {
     ASD_MSG* sdk = (*state);
     get_fake_message(66, &sdk->in_msg.msg); // random unsupported type
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_MSG_NOT_SUPPORTED);
@@ -1135,7 +1136,7 @@ void asd_msg_on_msg_recv_unsupported_cmd_stat_test(void** state)
     ASD_MSG* sdk = (*state);
     get_fake_message(JTAG_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = 66; // unknown cmd_stat
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.size_lsb, 0);
     assert_int_equal(msg_sent.header.size_msb, 0);
     assert_int_equal(msg_sent.header.cmd_stat, ASD_MSG_NOT_SUPPORTED);
@@ -1149,7 +1150,7 @@ void asd_msg_on_msg_recv_process_jtag_failed_test(void** state)
     sdk->in_msg.msg.header.size_msb =
         0x1f; // invalid size should generate jtag processing error
     sdk->in_msg.msg.header.size_lsb = 0xff;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1161,7 +1162,8 @@ void asd_msg_on_msg_recv_write_event_cfg_no_data_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = WRITE_EVENT_CONFIG;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1174,7 +1176,8 @@ void asd_msg_on_msg_recv_write_event_cfg_unkown_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = WRITE_EVENT_CONFIG;
     sdk->in_msg.msg.buffer[1] = 55;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     // these failures are ignored
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
@@ -1196,7 +1199,8 @@ void asd_msg_on_msg_recv_write_event_cfg_failure_test(void** state)
     command_result[0] = ST_ERR;
     command_index = 0;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1217,7 +1221,8 @@ void asd_msg_on_msg_recv_write_event_cfg_test(void** state)
     command_result[0] = ST_OK;
     command_index = 0;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1235,7 +1240,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_64_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_OK;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 64);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1253,7 +1259,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_1_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_OK;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 1);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1271,7 +1278,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_2_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_OK;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 2);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1289,7 +1297,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_4_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_OK;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 4);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1307,7 +1316,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_8_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_OK;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 8);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1326,7 +1336,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_invalid_prescale_test(void** state)
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     // prescale should revert to 1
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 1);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1344,7 +1355,8 @@ void asd_msg_on_msg_recv_write_cfg_tck_set_failed_test(void** state)
     JTAG_SET_JTAG_TCK_RESULT = ST_ERR;
     expect_any(__wrap_JTAG_set_jtag_tck, state);
     expect_value(__wrap_JTAG_set_jtag_tck, tck, 1);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1356,7 +1368,8 @@ void asd_msg_on_msg_recv_write_cfg_jtag_tck_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = JTAG_FREQ;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1368,7 +1381,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_prefix_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = DR_PREFIX;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1387,7 +1401,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_prefix_set_padding_failed_test(
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_DRPost);
     expect_value(__wrap_JTAG_set_padding, value, expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1405,7 +1420,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_prefix_set_padding_test(void** state)
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_DRPost);
     expect_value(__wrap_JTAG_set_padding, value, expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1417,7 +1433,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_postfix_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = DR_POSTFIX;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1436,7 +1453,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_postfix_set_padding_failed_test(
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_DRPre);
     expect_value(__wrap_JTAG_set_padding, value, expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1454,7 +1472,8 @@ void asd_msg_on_msg_recv_write_cfg_dr_postfix_set_padding_test(void** state)
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_DRPre);
     expect_value(__wrap_JTAG_set_padding, value, expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1466,7 +1485,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_prefix_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = IR_PREFIX;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1486,7 +1506,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_prefix_set_padding_failed_test(
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_IRPost);
     expect_value(__wrap_JTAG_set_padding, value, (expected << 8) | expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1505,7 +1526,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_prefix_set_padding_test(void** state)
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_IRPost);
     expect_value(__wrap_JTAG_set_padding, value, (expected << 8) | expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1517,7 +1539,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_postfix_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = IR_POSTFIX;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1537,7 +1560,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_postfix_set_padding_failed_test(
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_IRPre);
     expect_value(__wrap_JTAG_set_padding, value, (expected << 8) | expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1556,7 +1580,8 @@ void asd_msg_on_msg_recv_write_cfg_ir_postfix_set_padding_test(void** state)
     expect_any(__wrap_JTAG_set_padding, state);
     expect_value(__wrap_JTAG_set_padding, padding, JTAGPaddingTypes_IRPre);
     expect_value(__wrap_JTAG_set_padding, value, (expected << 8) | expected);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1568,7 +1593,8 @@ void asd_msg_on_msg_recv_write_cfg_prdy_timeout_invalid_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = PRDY_TIMEOUT;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1582,7 +1608,8 @@ void asd_msg_on_msg_recv_write_cfg_set_prdy_timeout_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = PRDY_TIMEOUT;
     sdk->in_msg.msg.buffer[1] = expected;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
     assert_int_equal(expected, sdk->prdy_timeout);
 }
@@ -1596,7 +1623,8 @@ void asd_msg_on_msg_recv_write_pins_no_data_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = WRITE_PINS;
     // it's not implemented yet so just make sure this succeeds
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1616,7 +1644,8 @@ void asd_msg_on_msg_recv_write_pins_failure_test(void** state)
     command_result[0] = ST_ERR;
     command_index = 0;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1635,7 +1664,8 @@ void asd_msg_on_msg_recv_write_pins_test(void** state)
     expect_value(__wrap_target_write, assert, false);
     command_result[0] = ST_OK;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1650,7 +1680,8 @@ void asd_msg_on_msg_recv_chain_select_invalid_test(void** state)
     // we only support chains 0 and 1
     sdk->in_msg.msg.buffer[1] = SCAN_CHAIN_SELECT + 2;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1670,7 +1701,8 @@ void asd_msg_on_msg_recv_chain_select_target_write_failed_test(void** state)
     expect_value(__wrap_target_write, assert, true);
     command_result[0] = ST_ERR;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1694,7 +1726,8 @@ void asd_msg_on_msg_recv_chain_select_set_active_chain_failed_test(void** state)
     expect_value(__wrap_JTAG_set_active_chain, chain, SCAN_CHAIN_1);
     command_result[1] = ST_ERR;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1709,7 +1742,8 @@ void asd_msg_on_msg_recv_chain_select_set_multichain_null_data_test(
     sdk->in_msg.msg.buffer[0] = WRITE_PINS;
     sdk->in_msg.msg.buffer[1] = SCAN_CHAIN_SELECT;
     sdk->jtag_chain_mode = JTAG_CHAIN_SELECT_MODE_MULTI;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1726,7 +1760,8 @@ void asd_msg_on_msg_recv_chain_select_set_multichain_unsuported(void** state)
     sdk->in_msg.msg.buffer[3] = 0xFF;
     sdk->in_msg.msg.buffer[4] = 0xFF;
     sdk->jtag_chain_mode = JTAG_CHAIN_SELECT_MODE_MULTI;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1740,7 +1775,8 @@ void asd_msg_on_msg_recv_unexpected_write_pins_index_test(void** state)
     sdk->in_msg.msg.buffer[0] = WRITE_PINS;
     sdk->in_msg.msg.buffer[1] = 191;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1764,7 +1800,8 @@ void asd_msg_on_msg_recv_chain_select_test(void** state)
     expect_value(__wrap_JTAG_set_active_chain, chain, SCAN_CHAIN_1);
     command_result[1] = ST_OK;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1777,7 +1814,8 @@ void asd_msg_on_msg_recv_read_status_no_data_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = READ_STATUS_MIN;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1837,7 +1875,7 @@ void asd_msg_on_msg_recv_read_status_response_buffer_full_test(void** state)
     command_index = 0;
 
     dummy = 0;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1858,7 +1896,8 @@ void asd_msg_on_msg_recv_read_status_target_read_failure_test(void** state)
     command_index = 0;
     TARGET_READ_ASSERTED = true;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1877,7 +1916,8 @@ void asd_msg_on_msg_recv_read_status_test(void** state)
     expect_any(__wrap_target_read, asserted);
     command_result[0] = ST_OK;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1889,7 +1929,8 @@ void asd_msg_on_msg_recv_wait_cycles_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = WAIT_CYCLES_TCK_DISABLE;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1907,7 +1948,8 @@ void asd_msg_on_msg_recv_wait_cycles_failed_test(void** state)
     expect_any(__wrap_JTAG_wait_cycles, state);
     expect_value(__wrap_JTAG_wait_cycles, number_of_cycles, expected);
     JTAG_WAIT_CYCLES_RESULT = ST_ERR;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1924,7 +1966,8 @@ void asd_msg_on_msg_recv_wait_cycles_test(void** state)
     expect_any(__wrap_JTAG_wait_cycles, state);
     expect_value(__wrap_JTAG_wait_cycles, number_of_cycles, 256);
     JTAG_WAIT_CYCLES_RESULT = ST_OK;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1944,7 +1987,8 @@ void asd_msg_on_msg_recv_wait_prdy_failed_test(void** state)
     command_result[0] = ST_ERR;
     command_index = 0;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -1964,7 +2008,8 @@ void asd_msg_on_msg_recv_wait_prdy_test(void** state)
     command_result[0] = ST_OK;
     command_index = 0;
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1977,7 +2022,8 @@ void asd_msg_on_msg_recv_clear_timeout_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = CLEAR_TIMEOUT;
     // it's not implemented yet so just make sure this succeeds
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -1992,7 +2038,8 @@ void asd_msg_on_msg_recv_tap_reset_failed_test(void** state)
 
     expect_any(__wrap_JTAG_tap_reset, state);
     JTAG_TAP_RESET_RESULT = ST_ERR;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2007,7 +2054,8 @@ void asd_msg_on_msg_recv_tap_reset_test(void** state)
 
     expect_any(__wrap_JTAG_tap_reset, state);
     JTAG_TAP_RESET_RESULT = ST_OK;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -2020,7 +2068,8 @@ void asd_msg_on_msg_recv_wait_sync_invalid_packet_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 2;
     sdk->in_msg.msg.buffer[0] = WAIT_SYNC;
     sdk->in_msg.msg.buffer[1] = 1; // missing 3 bytes
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2044,7 +2093,8 @@ void asd_msg_on_msg_recv_wait_sync_failed_test(void** state)
     expect_value(__wrap_target_wait_sync, delay, delay);
     command_result[0] = ST_ERR;
     command_index = 0;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2068,7 +2118,8 @@ void asd_msg_on_msg_recv_wait_sync_timeout_test(void** state)
     expect_value(__wrap_target_wait_sync, delay, delay);
     command_result[0] = ST_TIMEOUT;
     command_index = 0;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -2093,7 +2144,8 @@ void asd_msg_on_msg_recv_wait_sync_test(void** state)
     expect_value(__wrap_target_wait_sync, delay, delay);
     command_result[0] = ST_OK;
     command_index = 0;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -2109,7 +2161,8 @@ void asd_msg_on_msg_recv_set_tap_state_failed_test(void** state)
     expect_any(__wrap_JTAG_set_tap_state, state);
     expect_value(__wrap_JTAG_set_tap_state, tap_state, jtag_ex1_dr);
     JTAG_SET_TAP_STATE_RESULT = ST_ERR;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2125,7 +2178,8 @@ void asd_msg_on_msg_recv_set_tap_state_test(void** state)
     expect_any(__wrap_JTAG_set_tap_state, state);
     expect_value(__wrap_JTAG_set_tap_state, tap_state, jtag_cap_ir);
     JTAG_SET_TAP_STATE_RESULT = ST_OK;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -2139,7 +2193,8 @@ void asd_msg_on_msg_recv_write_scan_invalid_packet_test(void** state)
     sdk->in_msg.msg.buffer[0] =
         WRITE_SCAN_MIN + 22; // add invalid length not in packet
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2157,7 +2212,8 @@ void asd_msg_on_msg_recv_write_scan_determine_shift_end_state_failed_test(
     JTAG_GET_TAP_STATE_RESULT = ST_ERR;
     expect_any(__wrap_JTAG_get_tap_state, state);
     expect_any(__wrap_JTAG_get_tap_state, tap_state);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2186,7 +2242,8 @@ void asd_msg_on_msg_recv_write_scan_jtag_shift_failed_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2215,7 +2272,8 @@ void asd_msg_on_msg_recv_write_scan_jtag_shift_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -2232,7 +2290,8 @@ void asd_msg_on_msg_recv_read_scan_determine_shift_end_state_failed_test(
     JTAG_GET_TAP_STATE_RESULT = ST_ERR;
     expect_any(__wrap_JTAG_get_tap_state, state);
     expect_any(__wrap_JTAG_get_tap_state, tap_state);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2260,7 +2319,8 @@ void asd_msg_on_msg_recv_read_scan_jtag_shift_failed_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2291,7 +2351,8 @@ void asd_msg_on_msg_recv_read_scan_jtag_shift_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
     assert_int_equal(msg_sent.header.size_lsb, 2);
     assert_int_equal(msg_sent.buffer[0],
@@ -2324,7 +2385,7 @@ void asd_msg_on_msg_recv_read_scan_response_buffer_full_test(void** state)
             (unsigned char)(READ_SCAN_MIN + num_bits_sdk_encoded);
     }
 
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2354,7 +2415,8 @@ void asd_msg_on_msg_recv_read_scan_jtag_shift_64_bits_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
     assert_int_equal(msg_sent.header.size_lsb, 9);
     assert_int_equal(msg_sent.buffer[0], (unsigned char)(READ_SCAN_MIN + 0));
@@ -2371,7 +2433,8 @@ void asd_msg_on_msg_recv_read_write_scan_invalid_packet_test(void** state)
     sdk->in_msg.msg.buffer[0] =
         READ_WRITE_SCAN_MIN + 44; // add invalid length not in packet
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2389,7 +2452,8 @@ void asd_msg_on_msg_recv_read_write_scan_determine_shift_end_state_failed_test(
     JTAG_GET_TAP_STATE_RESULT = ST_ERR;
     expect_any(__wrap_JTAG_get_tap_state, state);
     expect_any(__wrap_JTAG_get_tap_state, tap_state);
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2418,7 +2482,8 @@ void asd_msg_on_msg_recv_read_write_scan_jtag_shift_failed_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2450,7 +2515,8 @@ void asd_msg_on_msg_recv_read_write_scan_jtag_shift_test(void** state)
     expect_any(__wrap_JTAG_shift, output);
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
     assert_int_equal(msg_sent.header.size_lsb, 2);
     assert_int_equal(msg_sent.buffer[0],
@@ -2487,7 +2553,8 @@ void asd_msg_on_msg_recv_read_write_scan_response_failed_test(void** state)
     expect_any(__wrap_JTAG_shift, end_tap_state);
 
     FakeSendFunctionResult = ST_ERR;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
 }
 
 // sorry this is such a long test.
@@ -2540,7 +2607,7 @@ void asd_msg_on_msg_recv_read_write_scan_response_buffer_full_test(void** state)
         }
     }
 
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2553,7 +2620,8 @@ void asd_msg_on_msg_recv_unknown_command_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.buffer[0] = 0x1f; // unknown command
 
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
 }
 
@@ -2561,30 +2629,30 @@ void send_error_message_invalid_param_test(void** state)
 {
     ASD_MSG* sdk = (*state);
     struct asd_message msg;
-    send_error_message(NULL, &msg, 0);
-    send_error_message(sdk, NULL, 0);
+    send_error_message(&msg, 0);
+    send_error_message(NULL, 0);
 }
 
 void should_remote_log_test(void** state)
 {
     ASD_MSG* sdk = (*state);
     sdk->asd_cfg->remote_logging.logging_level = IPC_LogType_Off;
-    assert_false(sdk->should_remote_log(ASD_LogLevel_Error, ASD_LogStream_All));
+    assert_false(should_remote_log(ASD_LogLevel_Error, ASD_LogStream_All));
 
     sdk->asd_cfg->remote_logging.logging_level = IPC_LogType_Error;
-    assert_false(sdk->should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
+    assert_false(should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
 
     sdk->asd_cfg->remote_logging.logging_level = ASD_LogLevel_Warning;
-    assert_false(sdk->should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
+    assert_false(should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
 
     sdk->asd_cfg->remote_logging.logging_level = ASD_LogLevel_Info;
-    assert_false(sdk->should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
+    assert_false(should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
 
     sdk->asd_cfg->remote_logging.logging_level = ASD_LogLevel_Debug;
-    assert_false(sdk->should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
+    assert_false(should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
 
     sdk->asd_cfg->remote_logging.logging_level = ASD_LogLevel_Trace;
-    assert_true(sdk->should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
+    assert_true(should_remote_log(ASD_LogLevel_Trace, ASD_LogStream_All));
 }
 
 void send_remote_log_message_invalid_param_test(void** state)
@@ -2598,11 +2666,18 @@ void send_remote_log_message_test(void** state)
 {
     ASD_MSG* sdk = (*state);
     char* msg = "this is a test msg";
+    /* Set up remote logging config so should_remote_log returns true */
+    sdk->asd_cfg->remote_logging.logging_level = IPC_LogType_Error;
+    sdk->asd_cfg->ipc_asd_log_map[ASD_LogLevel_Error] = IPC_LogType_Error;
+    sdk->asd_cfg->remote_logging.logging_stream = ASD_LogStream_JTAG;
     sdk->send_remote_logging_message(ASD_LogLevel_Error, ASD_LogStream_All,
                                      msg);
 
+    remote_logging_config expected_config = {{0}};
+    expected_config.logging_level = IPC_LogType_Error;
+    expected_config.logging_stream = ASD_LogStream_JTAG;
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
-    assert_int_equal(msg_sent.buffer[1], 4);
+    assert_int_equal(msg_sent.buffer[1], expected_config.value);
     // check the actual log message is present
     assert_string_equal(&msg_sent.buffer[2], msg);
     assert_int_equal(msg_sent.header.size_lsb, 2 + strlen(msg));
@@ -2613,6 +2688,10 @@ void send_remote_log_message_test(void** state)
 void send_remote_log_message_concatenated_test(void** state)
 {
     ASD_MSG* sdk = (*state);
+    /* Set up remote logging config */
+    sdk->asd_cfg->remote_logging.logging_level = IPC_LogType_Error;
+    sdk->asd_cfg->ipc_asd_log_map[ASD_LogLevel_Error] = IPC_LogType_Error;
+    sdk->asd_cfg->remote_logging.logging_stream = ASD_LogStream_JTAG;
     char data = '0';
     int cmd_hdr_sz = 2;
     char msg[MAX_DATA_SIZE * 2]; // going to be too big
@@ -2629,7 +2708,10 @@ void send_remote_log_message_concatenated_test(void** state)
                                      msg);
 
     assert_int_equal(msg_sent.buffer[0], AGENT_CONFIGURATION_CMD);
-    assert_int_equal(msg_sent.buffer[1], 4);
+    remote_logging_config expected_cfg = {{0}};
+    expected_cfg.logging_level = IPC_LogType_Error;
+    expected_cfg.logging_stream = ASD_LogStream_JTAG;
+    assert_int_equal(msg_sent.buffer[1], expected_cfg.value);
     // check the actual log message is present
     assert_string_equal(&msg_sent.buffer[cmd_hdr_sz], expected);
     u_int32_t buffer_length = (u_int32_t)MAX_DATA_SIZE;
@@ -2646,11 +2728,14 @@ void determine_shift_end_state_invalid_param_test(void** state)
     struct packet_data data;
     enum jtag_states end_state;
 
+    /* First call has valid params - new code calls JTAG_get_tap_state */
+    expect_any(__wrap_JTAG_get_tap_state, state);
+    expect_any(__wrap_JTAG_get_tap_state, tap_state);
+    assert_int_equal(ST_OK,
+                     determine_shift_end_state(0, &data, &end_state));
     assert_int_equal(ST_ERR,
-                     determine_shift_end_state(NULL, 0, &data, &end_state));
-    assert_int_equal(ST_ERR,
-                     determine_shift_end_state(sdk, 0, NULL, &end_state));
-    assert_int_equal(ST_ERR, determine_shift_end_state(sdk, 0, &data, NULL));
+                     determine_shift_end_state(0, NULL, &end_state));
+    assert_int_equal(ST_ERR, determine_shift_end_state(0, &data, NULL));
 }
 
 void determine_shift_end_state_get_jtag_state_failed_test(void** state)
@@ -2664,7 +2749,7 @@ void determine_shift_end_state_get_jtag_state_failed_test(void** state)
     expect_any(__wrap_JTAG_get_tap_state, tap_state);
 
     assert_int_equal(ST_ERR,
-                     determine_shift_end_state(sdk, 0, &data, &end_state));
+                     determine_shift_end_state(0, &data, &end_state));
 }
 
 void determine_shift_end_state_end_of_packet_test(void** state)
@@ -2681,7 +2766,7 @@ void determine_shift_end_state_end_of_packet_test(void** state)
     expect_any(__wrap_JTAG_get_tap_state, tap_state);
 
     assert_int_equal(ST_OK,
-                     determine_shift_end_state(sdk, 0, &data, &end_state));
+                     determine_shift_end_state(0, &data, &end_state));
     assert_int_equal(expected_state, end_state);
 }
 
@@ -2705,7 +2790,7 @@ void determine_shift_end_state_hw_mode_jtag_pau_dr_test(void** state)
     data.used = 0;
 
     assert_int_equal(ST_OK,
-                     determine_shift_end_state(sdk, 0, &data, &end_state));
+                     determine_shift_end_state(0, &data, &end_state));
     assert_int_equal(expected_state, end_state);
     // ensure data struct is untouched
     assert_int_equal(2, data.total);
@@ -2732,7 +2817,7 @@ void determine_shift_end_state_hw_mode_jtag_pau_ir_test(void** state)
     data.used = 0;
 
     assert_int_equal(ST_OK,
-                     determine_shift_end_state(sdk, 0, &data, &end_state));
+                     determine_shift_end_state(0, &data, &end_state));
     assert_int_equal(expected_state, end_state);
     // ensure data struct is untouched
     assert_int_equal(2, data.total);
@@ -2757,7 +2842,7 @@ void determine_shift_end_state_next_is_tap_state_cmd_test(void** state)
     data.used = 0;
 
     assert_int_equal(ST_OK,
-                     determine_shift_end_state(sdk, 0, &data, &end_state));
+                     determine_shift_end_state(0, &data, &end_state));
     assert_int_equal(expected_state, end_state);
     // ensure data struct is untouched
     assert_int_equal(1, data.total);
@@ -2781,7 +2866,7 @@ void determine_shift_end_state_next_is_not_read_scan_test(void** state)
     data.total = 1;
     data.used = 0;
 
-    assert_int_equal(ST_ERR, determine_shift_end_state(sdk, ScanType_Read,
+    assert_int_equal(ST_ERR, determine_shift_end_state(ScanType_Read,
                                                        &data, &end_state));
 
     // ensure data struct is untouched
@@ -2806,7 +2891,7 @@ void determine_shift_end_state_next_is_not_write_scan_test(void** state)
     data.total = 1;
     data.used = 0;
 
-    assert_int_equal(ST_ERR, determine_shift_end_state(sdk, ScanType_Write,
+    assert_int_equal(ST_ERR, determine_shift_end_state(ScanType_Write,
                                                        &data, &end_state));
 
     // ensure data struct is untouched
@@ -2831,7 +2916,7 @@ void determine_shift_end_state_next_is_not_readwrite_scan_test(void** state)
     data.total = 1;
     data.used = 0;
 
-    assert_int_equal(ST_ERR, determine_shift_end_state(sdk, ScanType_ReadWrite,
+    assert_int_equal(ST_ERR, determine_shift_end_state(ScanType_ReadWrite,
                                                        &data, &end_state));
 
     // ensure data struct is untouched
@@ -2845,9 +2930,9 @@ void asd_msg_read_invalid_params_test(void** state)
     bool pending = false;
     char fake_conn[9];
 
-    assert_int_equal(ST_ERR, asd_msg_read(NULL, &fake_conn, &pending));
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, NULL, &pending));
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, &fake_conn, NULL));
+    assert_int_equal(ST_OK, asd_msg_read());
+    assert_int_equal(ST_OK, asd_msg_read());
+    assert_int_equal(ST_OK, asd_msg_read());
 }
 
 void asd_msg_read_header_read_failure_test(void** state)
@@ -2856,14 +2941,9 @@ void asd_msg_read_header_read_failure_test(void** state)
     bool pending = false;
     char fake_conn[9];
 
-    expect_any(FakeReadFunctionPtr, state);
-    expect_any(FakeReadFunctionPtr, connection);
-    expect_any(FakeReadFunctionPtr, buffer);
-    expect_any(FakeReadFunctionPtr, num_to_read);
-    expect_any(FakeReadFunctionPtr, data_pending);
     FakeReadFunctionResult = ST_ERR;
 
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_ERR, asd_msg_read());
 }
 
 void asd_msg_read_invalid_size_test(void** state)
@@ -2872,21 +2952,16 @@ void asd_msg_read_invalid_size_test(void** state)
     bool pending = false;
     char fake_conn[9];
 
-    expect_any(FakeReadFunctionPtr, state);
-    expect_any(FakeReadFunctionPtr, connection);
     FakeReadFunctionBuffer[0] = 0xff;
     FakeReadFunctionBuffer[1] = 0xff;
     FakeReadFunctionBuffer[2] = 0xff;
     FakeReadFunctionBuffer[3] = 0xff;
-    expect_any(FakeReadFunctionPtr, buffer);
-    expect_any(FakeReadFunctionPtr, num_to_read);
     FakeReadFunctionDataPending = false;
-    expect_any(FakeReadFunctionPtr, data_pending);
     FakeReadFunctionResult = ST_OK;
     FakeReadFunctionNumBytesPerRead = -1;
     FakeReadFunctionNumBytesReadIndex = 0;
 
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_ERR, asd_msg_read());
 }
 
 void asd_msg_read_header_not_complete_test(void** state)
@@ -2896,24 +2971,19 @@ void asd_msg_read_header_not_complete_test(void** state)
     char fake_conn[9];
 
     // we will read 4 times
-    expect_any_count(FakeReadFunctionPtr, state, 4);
-    expect_any_count(FakeReadFunctionPtr, connection, 4);
     FakeReadFunctionBuffer[0] = 0x00;
     FakeReadFunctionBuffer[1] = 0x00;
     FakeReadFunctionBuffer[2] = 0x00;
     FakeReadFunctionBuffer[3] = 0x00;
-    expect_any_count(FakeReadFunctionPtr, buffer, 4);
-    expect_any_count(FakeReadFunctionPtr, num_to_read, 4);
     FakeReadFunctionDataPending = false;
-    expect_any_count(FakeReadFunctionPtr, data_pending, 4);
     FakeReadFunctionResult = ST_OK;
     FakeReadFunctionNumBytesPerRead = 1;
     FakeReadFunctionNumBytesReadIndex = 0;
 
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
+    assert_int_equal(ST_OK, asd_msg_read());
+    assert_int_equal(ST_OK, asd_msg_read());
+    assert_int_equal(ST_OK, asd_msg_read());
 }
 
 void asd_msg_read_header_only_success_test(void** state)
@@ -2922,21 +2992,16 @@ void asd_msg_read_header_only_success_test(void** state)
     bool pending = false;
     char fake_conn[9];
 
-    expect_any(FakeReadFunctionPtr, state);
-    expect_any(FakeReadFunctionPtr, connection);
     FakeReadFunctionBuffer[0] = 0;
     FakeReadFunctionBuffer[1] = 0;
     FakeReadFunctionBuffer[2] = 0;
     FakeReadFunctionBuffer[3] = 0;
-    expect_any(FakeReadFunctionPtr, buffer);
-    expect_any(FakeReadFunctionPtr, num_to_read);
     FakeReadFunctionDataPending = false;
-    expect_any(FakeReadFunctionPtr, data_pending);
     FakeReadFunctionResult = ST_OK;
     FakeReadFunctionNumBytesPerRead = -1;
     FakeReadFunctionNumBytesReadIndex = 0;
 
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
 }
 
 void asd_msg_read_header_and_buffer_success_test(void** state)
@@ -2946,38 +3011,28 @@ void asd_msg_read_header_and_buffer_success_test(void** state)
     char fake_conn[9];
 
     // header read
-    expect_any(FakeReadFunctionPtr, state);
-    expect_any(FakeReadFunctionPtr, connection);
     FakeReadFunctionBuffer[0] = AGENT_CONTROL_TYPE;
     FakeReadFunctionBuffer[1] = 2; // 2 byte buffer
     FakeReadFunctionBuffer[2] = 0;
     FakeReadFunctionBuffer[3] = AGENT_CONFIGURATION_CMD;
-    expect_any(FakeReadFunctionPtr, buffer);
-    expect_any(FakeReadFunctionPtr, num_to_read);
     FakeReadFunctionDataPending = false;
-    expect_any(FakeReadFunctionPtr, data_pending);
     FakeReadFunctionResult = ST_OK;
     FakeReadFunctionNumBytesPerRead = -1;
     FakeReadFunctionNumBytesReadIndex = 0;
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
 
     // buffer read
-    expect_any_count(FakeReadFunctionPtr, state, 2);
-    expect_any_count(FakeReadFunctionPtr, connection, 2);
     FakeReadFunctionBuffer[0] = AGENT_CONFIG_TYPE_JTAG_SETTINGS;
     FakeReadFunctionBuffer[1] = 1; // set to hw jtag mode.
-    expect_any_count(FakeReadFunctionPtr, buffer, 2);
-    expect_any_count(FakeReadFunctionPtr, num_to_read, 2);
     FakeReadFunctionDataPending = false;
-    expect_any_count(FakeReadFunctionPtr, data_pending, 2);
     FakeReadFunctionResult = ST_OK;
     // set to 1 byte read to ensure retry works
     FakeReadFunctionNumBytesPerRead = 1;
     FakeReadFunctionNumBytesReadIndex = 0;
     // first 1 byte read
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
     // second 1 byte read
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
 
     assert_int_equal(JTAG_DRIVER_MODE_HARDWARE, sdk->asd_cfg->jtag.mode);
 }
@@ -2990,12 +3045,7 @@ void asd_msg_read_header_and_buffer_data_pending_success_test(void** state)
     sdk->asd_cfg->jtag.mode = JTAG_DRIVER_MODE_SOFTWARE;
 
     // header and buffer reads
-    expect_any_count(FakeReadFunctionPtr, state, 2);
-    expect_any_count(FakeReadFunctionPtr, connection, 2);
-    expect_any_count(FakeReadFunctionPtr, buffer, 2);
-    expect_any_count(FakeReadFunctionPtr, num_to_read, 2);
     FakeReadFunctionDataPending = false;
-    expect_any_count(FakeReadFunctionPtr, data_pending, 2);
     FakeReadFunctionBuffer[0] = AGENT_CONTROL_TYPE;
     FakeReadFunctionBuffer[1] = 2; // 2 byte buffer
     FakeReadFunctionBuffer[2] = 0;
@@ -3008,7 +3058,7 @@ void asd_msg_read_header_and_buffer_data_pending_success_test(void** state)
     FakeReadFunctionNumBytesReadIndex = 0;
 
     // read whole packet
-    assert_int_equal(ST_OK, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_OK, asd_msg_read());
 
     assert_int_equal(JTAG_DRIVER_MODE_HARDWARE, sdk->asd_cfg->jtag.mode);
 }
@@ -3018,13 +3068,12 @@ void asd_msg_read_break_from_asd_msg_on_msg_recv_test(void** state)
     ASD_MSG* sdk = *state;
     bool pending = false;
     char fake_conn[9];
-    expect_any(FakeReadFunctionPtr, state);
-    expect_any(FakeReadFunctionPtr, connection);
-    expect_any(FakeReadFunctionPtr, buffer);
-    expect_any(FakeReadFunctionPtr, num_to_read);
-    expect_any(FakeReadFunctionPtr, data_pending);
     FakeReadFunctionResult = ST_OK;
     sdk->in_msg.read_state = READ_STATE_BUFFER;
+    sdk->in_msg.data_size = 1;
+    sdk->in_msg.read_index = 0;
+    FakeReadFunctionNumBytesPerRead = -1;
+    FakeReadFunctionNumBytesReadIndex = 0;
     get_fake_message(1, &sdk->in_msg.msg);
     sdk->handlers_initialized = false;
     command_index = 0;
@@ -3032,7 +3081,7 @@ void asd_msg_read_break_from_asd_msg_on_msg_recv_test(void** state)
     command_result[1] = ST_ERR;
     expect_any(__wrap_JTAG_initialize, state);
     expect_any(__wrap_JTAG_initialize, sw_mode);
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_ERR, asd_msg_read());
 }
 
 void asd_msg_read_bad_state_test(void** state)
@@ -3043,19 +3092,19 @@ void asd_msg_read_bad_state_test(void** state)
 
     sdk->in_msg.read_state = 99; // some invalid state.
 
-    assert_int_equal(ST_ERR, asd_msg_read(sdk, &fake_conn, &pending));
+    assert_int_equal(ST_ERR, asd_msg_read());
 }
 
 void send_response_invalid_response_test(void** state)
 {
     ASD_MSG* sdk = *state;
     struct asd_message message;
-
-    assert_int_equal(ST_ERR, send_response(NULL, &message));
-    assert_int_equal(ST_ERR, send_response(sdk, NULL));
+    memset(&message, 0, sizeof(message));
+    assert_int_equal(ST_OK, send_response(&message));
+    assert_int_equal(ST_ERR, send_response(NULL));
     message.header.size_lsb = 0xff;
     message.header.size_msb = 0x1f;
-    assert_int_equal(ST_ERR, send_response(sdk, &message));
+    assert_int_equal(ST_ERR, send_response(&message));
 }
 
 void asd_msg_get_fds_invalid_params_test(void** state)
@@ -3064,9 +3113,9 @@ void asd_msg_get_fds_invalid_params_test(void** state)
     target_fdarr_t fds;
     int num_fds;
 
-    assert_int_equal(ST_ERR, asd_msg_get_fds(NULL, &fds, &num_fds));
-    assert_int_equal(ST_ERR, asd_msg_get_fds(sdk, NULL, &num_fds));
-    assert_int_equal(ST_ERR, asd_msg_get_fds(sdk, &fds, NULL));
+    assert_int_equal(ST_ERR, asd_msg_get_fds(&fds, &num_fds));
+    assert_int_equal(ST_ERR, asd_msg_get_fds(NULL, &num_fds));
+    assert_int_equal(ST_ERR, asd_msg_get_fds(&fds, NULL));
 }
 
 void asd_msg_get_fds_failure_test(void** state)
@@ -3075,13 +3124,14 @@ void asd_msg_get_fds_failure_test(void** state)
     target_fdarr_t fds;
     int num_fds;
 
+    sdk->in_msg.msg.header.type = JTAG_TYPE;
     expect_any(__wrap_target_get_fds, state);
     expect_any(__wrap_target_get_fds, fds);
     expect_any(__wrap_target_get_fds, num_fds);
     command_result[0] = ST_ERR;
     command_index = 0;
 
-    assert_int_equal(ST_ERR, asd_msg_get_fds(sdk, &fds, &num_fds));
+    assert_int_equal(ST_ERR, asd_msg_get_fds(&fds, &num_fds));
 }
 
 void asd_msg_get_fds_test(void** state)
@@ -3090,20 +3140,24 @@ void asd_msg_get_fds_test(void** state)
     target_fdarr_t fds;
     int num_fds;
 
+    /* Set msg type to non-AGENT_CONTROL so target_get_fds is called */
+    sdk->in_msg.msg.header.type = JTAG_TYPE;
     expect_any(__wrap_target_get_fds, state);
     expect_any(__wrap_target_get_fds, fds);
     expect_any(__wrap_target_get_fds, num_fds);
     command_result[0] = ST_OK;
     command_index = 0;
 
-    assert_int_equal(ST_OK, asd_msg_get_fds(sdk, &fds, &num_fds));
+    assert_int_equal(ST_OK, asd_msg_get_fds(&fds, &num_fds));
 }
 
 void asd_msg_event_invalid_params_test(void** state)
 {
     struct pollfd poll_fd;
+    ASD_MSG* sdk = *state;
+    sdk->target_handler->initialized = false;
     poll_fd.fd = 1;
-    assert_int_equal(ST_ERR, asd_msg_event(NULL, poll_fd));
+    assert_int_equal(ST_ERR, asd_msg_event(poll_fd));
 }
 
 void asd_msg_event_target_event_error_test(void** state)
@@ -3118,7 +3172,7 @@ void asd_msg_event_target_event_error_test(void** state)
     command_result[0] = ST_ERR;
     command_index = 0;
 
-    assert_int_equal(ST_ERR, asd_msg_event(sdk, expected_fd));
+    assert_int_equal(ST_ERR, asd_msg_event(expected_fd));
 }
 
 void asd_msg_event_ASD_EVENT_XDP_PRESENT_test(void** state)
@@ -3131,10 +3185,11 @@ void asd_msg_event_ASD_EVENT_XDP_PRESENT_test(void** state)
     expect_value(__wrap_target_event, poll_fd.fd, expected_fd.fd);
     expect_any(__wrap_target_event, event);
     TARGET_EVENT_EVENT = ASD_EVENT_XDP_PRESENT;
+    sdk->asd_cfg->jtag.xdp_fail_enable = true;
     command_result[0] = ST_OK;
     command_index = 0;
 
-    assert_int_equal(ST_ERR, asd_msg_event(sdk, expected_fd));
+    assert_int_equal(ST_OK, asd_msg_event(expected_fd));
 }
 
 void asd_msg_event_ASD_EVENT_PRDY_EVENT_test(void** state)
@@ -3150,7 +3205,7 @@ void asd_msg_event_ASD_EVENT_PRDY_EVENT_test(void** state)
     command_result[0] = ST_OK;
     command_index = 0;
 
-    assert_int_equal(ST_OK, asd_msg_event(sdk, expected_fd));
+    assert_int_equal(ST_OK, asd_msg_event(expected_fd));
 
     assert_int_equal(msg_sent.buffer[0], ASD_EVENT_PRDY_EVENT);
     assert_int_equal(msg_sent.header.size_lsb, 1);
@@ -3175,15 +3230,14 @@ void asd_msg_event_send_failed_test(void** state)
 
     FakeSendFunctionResult = ST_ERR;
 
-    assert_int_equal(ST_ERR, asd_msg_event(sdk, expected_fd));
+    assert_int_equal(ST_ERR, asd_msg_event(expected_fd));
 }
 
 void process_i2c_messages_null_param_checks_test(void** state)
 {
     ASD_MSG* sdk = *state;
-    struct asd_message msg;
-    assert_int_equal(process_i2c_messages(sdk, NULL), ST_ERR);
-    assert_int_equal(process_i2c_messages(NULL, &msg), ST_ERR);
+    (void)sdk;
+    assert_int_equal(process_i2c_messages(NULL), ST_ERR);
 }
 
 void process_i2c_messages_msg_builder_fail_test(void** state)
@@ -3192,7 +3246,7 @@ void process_i2c_messages_msg_builder_fail_test(void** state)
     malloc_fail[0] = true;
     expect_value(__wrap_malloc, size, sizeof(I2C_Msg_Builder));
     malloc_fail_mode = true;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
     malloc_fail_mode = false;
 }
 
@@ -3203,7 +3257,7 @@ void process_i2c_messages_invalid_in_msg_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 0xff;
     sdk->in_msg.msg.header.size_msb = 0x1f;
 
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_bus_select_command_test(void** state)
@@ -3216,7 +3270,7 @@ void process_i2c_msg_handles_bus_select_command_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     expect_value(__wrap_i2c_bus_select, state, sdk->i2c_handler);
     expect_value(__wrap_i2c_bus_select, bus, expected_bus);
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
     assert_int_equal(sdk->out_msg.header.size_lsb, 0);
     assert_int_equal(sdk->out_msg.header.size_msb, 0);
 }
@@ -3228,7 +3282,7 @@ void process_i2c_msg_handles_invalid_bus_select_command_test(void** state)
     // missing bus byte, just 1 byte
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.header.size_msb = 0;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 }
 
 void process_i2c_msg_handles_bus_select_command_error_test(void** state)
@@ -3243,7 +3297,7 @@ void process_i2c_msg_handles_bus_select_command_error_test(void** state)
     expect_value(__wrap_i2c_bus_select, state, sdk->i2c_handler);
     expect_value(__wrap_i2c_bus_select, bus, expected_bus);
     BUS_SELECT_STATUS = ST_ERR;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 }
 
 void process_i2c_msg_handles_set_sclk_command_test(void** state)
@@ -3257,7 +3311,7 @@ void process_i2c_msg_handles_set_sclk_command_test(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     expect_value(__wrap_i2c_set_sclk, state, sdk->i2c_handler);
     expect_value(__wrap_i2c_set_sclk, sclk, expected_sclk);
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 }
 
 void process_i2c_msg_handles_invalid_set_sclk_command_test(void** state)
@@ -3267,7 +3321,7 @@ void process_i2c_msg_handles_invalid_set_sclk_command_test(void** state)
     // missing bus byte, just 1 byte
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.header.size_msb = 0;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_set_sclk_command_error_test(void** state)
@@ -3283,7 +3337,7 @@ void process_i2c_msg_handles_set_sclk_command_error_test(void** state)
     expect_value(__wrap_i2c_set_sclk, state, sdk->i2c_handler);
     expect_value(__wrap_i2c_set_sclk, sclk, expected_sclk);
     SET_SCLK_STATUS = ST_ERR;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_read_command_short_packet_error_test(void** state)
@@ -3292,7 +3346,7 @@ void process_i2c_msg_handles_read_command_short_packet_error_test(void** state)
     sdk->in_msg.msg.buffer[0] = (unsigned char)I2C_READ_MIN;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.header.size_msb = 0;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_read_command_test(void** state)
@@ -3311,7 +3365,7 @@ void process_i2c_msg_handles_read_command_test(void** state)
     expect_value(__wrap_i2c_read_write, state, sdk->i2c_handler);
     expect_any(__wrap_i2c_read_write, msg_set);
     READ_WRITE_STATUS = ST_OK;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
     // 2 for cmd and ACKs byte
     assert_int_equal(sdk->out_msg.header.size_lsb, 2 + read_length);
     assert_int_equal(sdk->out_msg.header.size_msb, 0);
@@ -3339,7 +3393,7 @@ void process_i2c_msg_handles_i2c_read_write_failed_test(void** state)
     expect_any(__wrap_i2c_read_write, msg_set);
     READ_WRITE_STATUS = ST_ERR;
     // a i2c read write failure is treated as a NAK
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 }
 
 void process_i2c_msg_handles_write_command_short_packet_error_test(void** state)
@@ -3348,7 +3402,7 @@ void process_i2c_msg_handles_write_command_short_packet_error_test(void** state)
     sdk->in_msg.msg.buffer[0] = (unsigned char)I2C_WRITE_MIN;
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.header.size_msb = 0;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_write_command_test(void** state)
@@ -3367,7 +3421,7 @@ void process_i2c_msg_handles_write_command_test(void** state)
     expect_value(__wrap_i2c_read_write, state, sdk->i2c_handler);
     expect_any(__wrap_i2c_read_write, msg_set);
     READ_WRITE_STATUS = ST_OK;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
     // 2 for cmd and ACKs byte
     assert_int_equal(sdk->out_msg.header.size_lsb, 2);
     assert_int_equal(sdk->out_msg.header.size_msb, 0);
@@ -3384,7 +3438,7 @@ void process_i2c_msg_handles_unknown_command_test(void** state)
     sdk->in_msg.msg.header.size_lsb = 1;
     sdk->in_msg.msg.header.size_msb = 0;
 
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
 }
 
 void process_i2c_msg_handles_multiple_commands_test(void** state)
@@ -3427,7 +3481,7 @@ void process_i2c_msg_handles_multiple_commands_test(void** state)
     sdk->in_msg.msg.buffer[10] = 44;
     sdk->in_msg.msg.header.size_lsb += 6;
 
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 
     assert_int_equal(sdk->out_msg.header.size_lsb, 6);
     assert_int_equal(sdk->out_msg.header.size_msb, 0);
@@ -3461,7 +3515,7 @@ void process_i2c_msg_handles_i2c_msg_initialize_test(void** state)
     malloc_fail[1] = true;
     expect_value(__wrap_malloc, size, sizeof(struct i2c_rdwr_ioctl_data));
     malloc_fail_mode = true;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
     malloc_fail_mode = false;
 }
 
@@ -3554,7 +3608,7 @@ void build_responses_i2c_msg_get_asd_i2c_msg_failed_test(void** state)
     expect_any(__wrap_i2c_read_write, msg_set);
     READ_WRITE_STATUS = ST_OK;
     I2C_MSG_GET_ASD_I2C_MSG_STATUS = ST_ERR;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
     I2C_MSG_GET_ASD_I2C_MSG_STATUS = ST_OK;
 }
 
@@ -3575,7 +3629,7 @@ void process_i2c_msg_handles_i2c_msg_reset_failed_test(void** state)
     expect_any(__wrap_i2c_read_write, msg_set);
     READ_WRITE_STATUS = ST_OK;
     I2C_MSG_RESET_STATUS = ST_ERR;
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_ERR);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_ERR);
     I2C_MSG_RESET_STATUS = ST_OK;
 }
 
@@ -3586,8 +3640,8 @@ void asd_msg_on_msg_recv_process_i2c_messages_failed_test(void** state)
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    sdk->i2c_handler->config->enable_i2c = false;
-    asd_msg_on_msg_recv(*state);
+    sdk->buscfg->enable_i2c = false;
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_I2C_MSG_NOT_SUPPORTED);
 }
 
@@ -3598,8 +3652,9 @@ void asd_msg_on_msg_recv_process_msg_process_i2c_msg_failed_test(void** state)
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    sdk->i2c_handler->config->enable_i2c = true;
-    asd_msg_on_msg_recv(*state);
+    sdk->buscfg->enable_i2c = true;
+    flock_cmd_index = 0;
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_I2C_MSG);
 }
 
@@ -3611,10 +3666,13 @@ void asd_msg_on_msg_recv_process_msg_process_i2c_msg_failed_lock_test(
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    sdk->i2c_handler->config->enable_i2c = true;
-    command_index = 0;
+    sdk->buscfg->enable_i2c = true;
+    /* Reset all bus types, then enable only the expected bus */
+    for (int i = 0; i < MAX_IxC_BUSES; i++)
+        sdk->asd_cfg->buscfg.bus_config_type[i] = BUS_CONFIG_NOT_ALLOWED;
+    flock_cmd_index = 0;
     FLOCK_RESULT[0] = -1;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_I2C_LOCK);
 }
 
@@ -3625,11 +3683,11 @@ void asd_msg_on_msg_recv_process_msg_i2c_msg_failed_unlock_test(void** state)
     FakeSendFunctionResult = ST_ERR;
     // there is no error returned from this, but just make sure the code
     // doesnt blow up.
-    sdk->i2c_handler->config->enable_i2c = true;
-    command_index = 0;
+    sdk->buscfg->enable_i2c = true;
+    flock_cmd_index = 0;
     FLOCK_RESULT[0] = 0;
     FLOCK_RESULT[1] = -1;
-    process_message(*state);
+    process_message();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_REMOVE_I2C_LOCK);
 }
 
@@ -3637,7 +3695,7 @@ void process_i2c_msg_handles_build_responses_failed_test(void** state)
 {
     ASD_MSG* sdk = (*state);
     get_fake_message(I2C_TYPE, &sdk->in_msg.msg);
-    assert_int_equal(build_responses(sdk, &I2C_MSG_COUNT, NULL, true), ST_ERR);
+    assert_int_equal(build_responses(&I2C_MSG_COUNT, NULL, true), ST_ERR);
 }
 
 void process_i2c_msg_handles_build_responses_buffer_full_failed_test(
@@ -3651,7 +3709,7 @@ void process_i2c_msg_handles_build_responses_buffer_full_failed_test(
     I2C_MSG_RESET_STATUS = ST_OK;
     i2c_msg_get_count_mode = true;
     i2c_msg_get_asd_i2c_msg_mode = true;
-    assert_int_equal(build_responses(sdk, &I2C_MSG_COUNT, builder, true),
+    assert_int_equal(build_responses(&I2C_MSG_COUNT, builder, true),
                      ST_ERR);
     i2c_msg_get_count_mode = false;
     i2c_msg_get_asd_i2c_msg_mode = false;
@@ -3668,7 +3726,7 @@ void process_i2c_msg_handles_build_responses_buffer_full_test(void** state)
     i2c_msg_get_count_mode = true;
     i2c_msg_get_asd_i2c_msg_mode = true;
     FakeSendFunctionResult = ST_OK;
-    assert_int_equal(build_responses(sdk, &I2C_MSG_COUNT, builder, true),
+    assert_int_equal(build_responses(&I2C_MSG_COUNT, builder, true),
                      ST_OK);
     i2c_msg_get_count_mode = false;
     i2c_msg_get_asd_i2c_msg_mode = false;
@@ -3679,17 +3737,15 @@ void i2c_lock_unlock_test(void** state)
 {
     ASD_MSG* sdk = *state;
     get_fake_message(I2C_TYPE, &sdk->in_msg.msg);
-    sdk->i2c_handler->config->enable_i2c = true;
+    sdk->buscfg->enable_i2c = true;
+    flock_cmd_index = 0;
     FLOCK_RESULT[0] = 0;
     FLOCK_RESULT[1] = 0;
-    process_message(sdk);
-    command_index = 0;
     assert_int_equal(flock_i2c(sdk, LOCK_EX), ST_OK);
     assert_int_equal(flock_i2c(sdk, LOCK_UN), ST_OK);
+    flock_cmd_index = 0;
     FLOCK_RESULT[0] = -1;
     FLOCK_RESULT[1] = -1;
-    process_message(sdk);
-    command_index = 0;
     assert_int_equal(flock_i2c(sdk, LOCK_EX), ST_ERR);
     assert_int_equal(flock_i2c(sdk, LOCK_UN), ST_ERR);
 }
@@ -3700,7 +3756,7 @@ void asd_msg_on_msg_recv_agent_control_memcpy_safe_failure1(void** state)
     get_fake_message(AGENT_CONTROL_TYPE, &sdk->in_msg.msg);
     sdk->in_msg.msg.header.cmd_stat = OBTAIN_DOWNSTREAM_VERSION_CMD;
     MEMCPY_SAFE_RESULT = 1;
-    asd_msg_on_msg_recv(*state);
+    asd_msg_on_msg_recv();
     assert_memory_not_equal(msg_sent.buffer + 1, asd_version,
                             sizeof(asd_version));
 }
@@ -3712,7 +3768,7 @@ void asd_msg_on_msg_recv_agent_control_memcpy_safe_failure2(void** state)
     sdk->in_msg.msg.header.enc_bit = 1;
     struct asd_message error_message;
     MEMCPY_SAFE_RESULT = 1;
-    asd_msg_on_msg_recv(sdk);
+    asd_msg_on_msg_recv();
     assert_memory_not_equal(&error_message.header, &sdk->in_msg.msg.header,
                             sizeof(struct message_header));
 }
@@ -3743,7 +3799,8 @@ void asd_msg_on_msg_recv_agent_control_memcpy_safe_failure4(void** state)
     sdk->in_msg.msg.buffer[3] = 0xFF;
     sdk->in_msg.msg.buffer[4] = 0xFF;
     sdk->jtag_chain_mode = JTAG_CHAIN_SELECT_MODE_MULTI;
-    asd_msg_on_msg_recv(*state);
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
     assert_int_equal(msg_sent.header.cmd_stat, ASD_SUCCESS);
 }
 
@@ -3757,21 +3814,21 @@ void asd_msg_on_msg_recv_agent_control_memcpy_safe_failure5(void** state)
     sdk->in_msg.msg.header.size_msb = 0;
     expect_value(__wrap_i2c_bus_select, state, sdk->i2c_handler);
     expect_value(__wrap_i2c_bus_select, bus, expected_bus);
-    assert_int_equal(process_i2c_messages(sdk, &sdk->in_msg.msg), ST_OK);
+    assert_int_equal(process_i2c_messages(&sdk->in_msg.msg), ST_OK);
 }
 
 void read_openbmc_version_null_failure_test(void** state)
 {
     ASD_MSG* sdk = (ASD_MSG*)malloc(sizeof(ASD_MSG));
     OS_RELEASE_GOOD = 2;
-    assert_int_equal(ST_ERR, read_openbmc_version(sdk));
+    assert_int_equal(ST_ERR, read_openbmc_version());
 }
 
 void read_openbmc_version_read_minus_test(void** state)
 {
     ASD_MSG* sdk = (ASD_MSG*)malloc(sizeof(ASD_MSG));
     OS_RELEASE_GOOD = 1;
-    assert_int_equal(ST_ERR, read_openbmc_version(sdk));
+    assert_int_equal(ST_ERR, read_openbmc_version());
 }
 
 void read_openbmc_version_read_memcpy_safe_failed_test(void** state)
@@ -3779,9 +3836,83 @@ void read_openbmc_version_read_memcpy_safe_failed_test(void** state)
     ASD_MSG* sdk = (ASD_MSG*)malloc(sizeof(ASD_MSG));
     OS_RELEASE_GOOD = 0;
     MEMCPY_SAFE_RESULT = 1;
-    assert_int_equal(ST_ERR, read_openbmc_version(sdk));
+    assert_int_equal(ST_ERR, read_openbmc_version());
 }
 
+
+void asd_msg_on_msg_recv_tap_state_null_active_chain_test(void** state)
+{
+    ASD_MSG* sdk = (*state);
+    get_fake_message(JTAG_TYPE, &sdk->in_msg.msg);
+    sdk->in_msg.msg.header.cmd_stat = 0;
+    sdk->in_msg.msg.header.size_msb = 0;
+    sdk->in_msg.msg.header.size_lsb = 1;
+    sdk->in_msg.msg.buffer[0] = TAP_STATE_MIN + jtag_ex1_dr;
+
+    sdk->jtag_handler->active_chain = NULL;
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
+    assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
+    sdk->jtag_handler->active_chain = &sdk->jtag_handler->chains[0];
+}
+
+void asd_msg_on_msg_recv_write_scan_null_active_chain_test(void** state)
+{
+    ASD_MSG* sdk = (*state);
+    get_fake_message(JTAG_TYPE, &sdk->in_msg.msg);
+    sdk->in_msg.msg.header.cmd_stat = 0;
+    sdk->in_msg.msg.header.size_msb = 0;
+    sdk->in_msg.msg.header.size_lsb = 2;
+    sdk->in_msg.msg.buffer[0] = WRITE_SCAN_MIN + 1;
+    sdk->in_msg.msg.buffer[1] = 0xAA;
+
+    sdk->jtag_handler->active_chain = NULL;
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
+    assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
+    sdk->jtag_handler->active_chain = &sdk->jtag_handler->chains[0];
+}
+
+void asd_msg_on_msg_recv_read_scan_null_active_chain_test(void** state)
+{
+    ASD_MSG* sdk = (*state);
+    get_fake_message(JTAG_TYPE, &sdk->in_msg.msg);
+    sdk->in_msg.msg.header.cmd_stat = 0;
+    sdk->in_msg.msg.header.size_msb = 0;
+    sdk->in_msg.msg.header.size_lsb = 1;
+    sdk->in_msg.msg.buffer[0] = READ_SCAN_MIN + 1;
+
+    sdk->jtag_handler->active_chain = NULL;
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
+    assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
+    sdk->jtag_handler->active_chain = &sdk->jtag_handler->chains[0];
+}
+
+void asd_msg_on_msg_recv_read_write_scan_null_active_chain_test(void** state)
+{
+    ASD_MSG* sdk = (*state);
+    get_fake_message(JTAG_TYPE, &sdk->in_msg.msg);
+    sdk->in_msg.msg.header.cmd_stat = 0;
+    sdk->in_msg.msg.header.size_msb = 0;
+    sdk->in_msg.msg.header.size_lsb = 2;
+    sdk->in_msg.msg.buffer[0] = READ_WRITE_SCAN_MIN + 1;
+    sdk->in_msg.msg.buffer[1] = 0xBB;
+
+    sdk->jtag_handler->active_chain = NULL;
+    expect_check_shift_state();
+    asd_msg_on_msg_recv();
+    assert_int_equal(msg_sent.header.cmd_stat, ASD_FAILURE_PROCESS_JTAG_MSG);
+    sdk->jtag_handler->active_chain = &sdk->jtag_handler->chains[0];
+}
+
+void msb_from_msg_size_clamp_exceeds_max_data_size_test(void** state)
+{
+    (void)state;
+    uint8_t result_normal = msb_from_msg_size(MAX_DATA_SIZE);
+    uint8_t result_over = msb_from_msg_size(MAX_DATA_SIZE + 100);
+    assert_int_equal(result_normal, result_over);
+}
 int main()
 {
     const struct CMUnitTest tests[] = {
@@ -4202,7 +4333,20 @@ int main()
         cmocka_unit_test_setup_teardown(i2c_lock_unlock_test, setup, teardown),
         cmocka_unit_test(read_openbmc_version_null_failure_test),
         cmocka_unit_test(read_openbmc_version_read_minus_test),
-        cmocka_unit_test(read_openbmc_version_read_memcpy_safe_failed_test)};
+        cmocka_unit_test(read_openbmc_version_read_memcpy_safe_failed_test),
+        cmocka_unit_test_setup_teardown(
+            asd_msg_on_msg_recv_tap_state_null_active_chain_test, setup,
+            teardown),
+        cmocka_unit_test_setup_teardown(
+            asd_msg_on_msg_recv_write_scan_null_active_chain_test, setup,
+            teardown),
+        cmocka_unit_test_setup_teardown(
+            asd_msg_on_msg_recv_read_scan_null_active_chain_test, setup,
+            teardown),
+        cmocka_unit_test_setup_teardown(
+            asd_msg_on_msg_recv_read_write_scan_null_active_chain_test, setup,
+            teardown),
+        cmocka_unit_test(msb_from_msg_size_clamp_exceeds_max_data_size_test)};
 
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

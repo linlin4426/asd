@@ -144,10 +144,7 @@ int jtag_test_main(int argc, char** argv)
                     "Failed to deinitialize the JTAG handler.");
             result = false;
         }
-        else
-        {
-            free(jtag);
-        }
+        free(jtag);
     }
 
     return result ? 0 : -1;

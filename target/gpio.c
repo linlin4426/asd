@@ -55,27 +55,27 @@ STATUS gpio_export(int gpio, int* gpio_fd)
 {
     int fd;
     char buf[BUFF_SIZE];
-    int ia[1];
+    int i;
     STATUS result = ST_OK;
     if (!gpio_fd)
         return ST_ERR;
-    ia[0] = gpio;
-    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value", ia, 1);
+    i = gpio;
+    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value", i);
     *gpio_fd = open(buf, O_RDWR);
     if (*gpio_fd == -1)
     {
         fd = open("/sys/class/gpio/export", O_WRONLY);
         if (fd >= 0)
         {
-            sprintf_s(buf, sizeof(buf), "%d", ia, 1);
+            sprintf_s(buf, sizeof(buf), "%d", i);
             if (write(fd, buf, strnlen_s(buf, BUFF_SIZE)) < 0)
             {
                 result = ST_ERR;
             }
             else
             {
-                sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value", ia,
-                          1);
+                sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value",
+                          i);
                 *gpio_fd = open(buf, O_RDWR);
                 if (*gpio_fd == -1)
                     result = ST_ERR;
@@ -95,21 +95,21 @@ STATUS gpio_unexport(int gpio)
     int fd;
     char buf[BUFF_SIZE];
     STATUS result = ST_OK;
-    int ia[1];
-    ia[0] = gpio;
-    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value", ia, 1);
+    int i;
+    i = gpio;
+    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/value", i);
     fd = open(buf, O_WRONLY);
     if (fd >= 0)
     {
         // the gpio exists
         close(fd);
         fd = open("/sys/class/gpio/unexport", O_WRONLY);
-        int ia[1];
-        ia[0] = gpio;
+        int i;
+        i = gpio;
 
         if (fd >= 0)
         {
-            sprintf_s(buf, sizeof(buf), "%d", ia, 1);
+            sprintf_s(buf, sizeof(buf), "%d", i);
             if (write(fd, buf, strnlen_s(buf, BUFF_SIZE)) < 0)
             {
                 result = ST_ERR;
@@ -165,11 +165,11 @@ STATUS gpio_set_edge(int gpio, GPIO_EDGE edge)
 {
     int fd;
     char buf[BUFF_SIZE];
-    int ia[1];
-    ia[0] = gpio;
+    int i;
+    i = gpio;
     STATUS result = ST_ERR;
 
-    sprintf_s((buf), sizeof(buf), "/sys/class/gpio/gpio%d/edge", ia, 1);
+    sprintf_s((buf), sizeof(buf), "/sys/class/gpio/gpio%d/edge", i);
     fd = open(buf, O_WRONLY);
     if (fd >= 0)
     {
@@ -195,10 +195,10 @@ STATUS gpio_set_direction(int gpio, GPIO_DIRECTION direction)
 {
     int fd;
     char buf[BUFF_SIZE];
-    int ia[1];
-    ia[0] = gpio;
+    int i;
+    i = gpio;
     STATUS result = ST_ERR;
-    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/direction", ia, 1);
+    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/direction", i);
     fd = open(buf, O_WRONLY);
     if (fd >= 0)
     {
@@ -225,9 +225,9 @@ STATUS gpio_set_active_low(int gpio, bool active_low)
     int fd;
     char buf[BUFF_SIZE];
     STATUS result = ST_ERR;
-    int ia[1];
-    ia[0] = gpio;
-    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/active_low", ia, 1);
+    int i;
+    i = gpio;
+    sprintf_s(buf, sizeof(buf), "/sys/class/gpio/gpio%d/active_low", i);
     fd = open(buf, O_WRONLY);
     if (fd >= 0)
     {

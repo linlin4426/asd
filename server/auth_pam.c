@@ -111,7 +111,7 @@ int pam_conversation_function(int numMsg, const struct pam_message** msg,
 
                     /* Assume PAM is only prompting for
                      * the password as hidden input */
-                    resp[i]->resp = pass;
+                    (*resp)[i].resp = pass;
                     result = PAM_SUCCESS;
                 }
             }
@@ -175,7 +175,17 @@ static auth_ret_t credentials_are_valid(unsigned char* cp_password,
         }
         else
         {
-            ret = AUTHRET_OK;
+            pamerr = pam_acct_mgmt(pamh, PAM_SILENT);
+            if (PAM_SUCCESS != pamerr)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_Network,
+                        ASD_LogOption_None,
+                        "pam_acct_mgmt() error %d", pamerr);
+            }
+            else
+            {
+                ret = AUTHRET_OK;
+            }
         }
     }
     // remove all traces of password
@@ -186,7 +196,7 @@ static auth_ret_t credentials_are_valid(unsigned char* cp_password,
         if (PAM_SUCCESS != (pamerr = pam_end(pamh, pamerr)))
         {
             ASD_log(ASD_LogLevel_Error, ASD_LogStream_Network,
-                    ASD_LogOption_None, "pam_end(%d) error %d", (int)pamh,
+                    ASD_LogOption_None, "pam_end(%p) error %d", (void*)pamh,
                     pamerr);
         }
     }

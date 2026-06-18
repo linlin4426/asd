@@ -542,9 +542,21 @@ static STATUS get_platform_index(char * bus_name, uint8_t * platIndex)
     else
     {
         // Read Linux assigned bus from bus_filename
-        fseek (fd, 0, SEEK_END);
+        if (fseek(fd, 0, SEEK_END) != 0)
+        {
+            ASD_log(ASD_LogLevel_Error, stream, option,
+                    "fseek SEEK_END failed for %s", bus_filename);
+            fclose(fd);
+            return ST_ERR;
+        }
         length = ftell (fd);
-        fseek (fd, 0, SEEK_SET);
+        if (fseek(fd, 0, SEEK_SET) != 0)
+        {
+            ASD_log(ASD_LogLevel_Error, stream, option,
+                    "fseek failed for %s", bus_filename);
+            fclose(fd);
+            return ST_ERR;
+        }
 
         if (sizeof(buffer) > length)
         {

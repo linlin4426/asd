@@ -37,7 +37,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 
 #include "../i2c_handler.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 static int FAKE_DRIVER_HANDLE = 4;
@@ -127,7 +127,7 @@ void I2CHandler_null_parameter_test()
     assert_true(handler == NULL);
 }
 
-static i2c_config global_i2c_config;
+static bus_config global_i2c_config;
 
 void I2CHandler_create_test()
 {
@@ -165,10 +165,8 @@ void i2c_bus_select_i2c_disabled_test()
 void i2c_bus_select_open_test(void** state)
 {
     global_i2c_config.default_bus = FAKE_BUS;
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
-    {
-        global_i2c_config.allowed_buses[i] = true;
-    }
+    global_i2c_config.bus_config_map[0] = FAKE_BUS;
+    global_i2c_config.bus_config_type[0] = BUS_CONFIG_I2C;
 
     I2C_Handler handler;
     handler.i2c_driver_handle = UNINITIALIZED_I2C_DRIVER_HANDLE;
@@ -187,10 +185,8 @@ void i2c_bus_select_open_test(void** state)
 void i2c_bus_select_i2c_open_driver_test(void** state)
 {
     global_i2c_config.default_bus = FAKE_BUS;
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
-    {
-        global_i2c_config.allowed_buses[i] = true;
-    }
+    global_i2c_config.bus_config_map[0] = FAKE_BUS;
+    global_i2c_config.bus_config_type[0] = BUS_CONFIG_I2C;
 
     I2C_Handler handler;
     handler.i2c_driver_handle = UNINITIALIZED_I2C_DRIVER_HANDLE;
@@ -219,10 +215,8 @@ void i2c_bus_select_close_test()
 {
     global_i2c_config.default_bus = FAKE_BUS;
     global_i2c_config.enable_i2c = true;
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
-    {
-        global_i2c_config.allowed_buses[i] = true;
-    }
+    global_i2c_config.bus_config_map[0] = FAKE_BUS;
+    global_i2c_config.bus_config_type[0] = BUS_CONFIG_I2C;
     I2C_Handler handler;
     int expected = 22;
     handler.i2c_driver_handle = expected;
@@ -243,10 +237,11 @@ void i2c_bus_select_close_test()
 
 void i2c_bus_select_disallowed_bus_test()
 {
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
+    for (int i = 0; i < MAX_IxC_BUSES; i++)
     {
-        global_i2c_config.allowed_buses[i] = false;
+        global_i2c_config.bus_config_type[i] = BUS_CONFIG_NOT_ALLOWED;
     }
+    global_i2c_config.enable_i2c = true;
     I2C_Handler handler;
     handler.config = &global_i2c_config;
     assert_int_equal(i2c_bus_select(&handler, 1), ST_ERR);
@@ -274,10 +269,8 @@ void i2c_initialize_i2c_disabled_test()
 
 void i2c_initialize_initializes_default_bus_test()
 {
-    for (int i = 0; i < MAX_I2C_BUSES; i++)
-    {
-        global_i2c_config.allowed_buses[i] = true;
-    }
+    global_i2c_config.bus_config_map[0] = FAKE_BUS;
+    global_i2c_config.bus_config_type[0] = BUS_CONFIG_I2C;
     global_i2c_config.default_bus = FAKE_BUS;
     global_i2c_config.enable_i2c = true;
     I2C_Handler handler;

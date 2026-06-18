@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2019, Intel Corporation
+Copyright (c) 2026, Intel Corporation
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -25,11 +25,64 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef ASD_MSG_TESTS_H
-#define ASD_MSG_TESTS_H
-#include "asd_common.h"
-#include "../asd_msg.h"
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-STATUS flock_i2c(ASD_MSG* state, int op);
+#include <cmocka.h>
+#include "logging.h"
 
-#endif // ASD_MSG_TESTS_H
+#include "../vprobe_handler.h"
+
+// Wraps
+void __wrap_ASD_log(ASD_LogLevel level, ASD_LogStream stream,
+                    ASD_LogOption option, const char* format, ...)
+{
+}
+
+void __wrap_ASD_log_buffer(ASD_LogLevel level, ASD_LogStream stream,
+                           ASD_LogOption option, const unsigned char* ptr,
+                           size_t len, const char* prefixPtr)
+{
+}
+
+Dbus_Handle* __wrap_dbus_helper(void)
+{
+    return (Dbus_Handle*)mock();
+}
+
+STATUS __wrap_dbus_initialize(Dbus_Handle* state)
+{
+    return (STATUS)mock();
+}
+
+STATUS __wrap_dbus_deinitialize(Dbus_Handle* state)
+{
+    return (STATUS)mock();
+}
+
+// Tests
+
+void vProbe_initialize_null_returns_err_test(void** state)
+{
+    (void)state;
+    assert_int_equal(ST_ERR, vProbe_initialize(NULL));
+}
+
+void vProbe_deinitialize_null_returns_err_test(void** state)
+{
+    (void)state;
+    assert_int_equal(ST_ERR, vProbe_deinitialize(NULL));
+}
+
+int main()
+{
+    const struct CMUnitTest tests[] = {
+        cmocka_unit_test(vProbe_initialize_null_returns_err_test),
+        cmocka_unit_test(vProbe_deinitialize_null_returns_err_test),
+    };
+    return cmocka_run_group_tests(tests, NULL, NULL);
+}

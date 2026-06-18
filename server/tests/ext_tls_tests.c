@@ -41,7 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "../ext_network.h"
 #include "../ext_tls.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 // static char temporary_log_buffer[512];
@@ -162,8 +162,8 @@ void expect_SSL_CTX_set_cipher_list(bool success)
         SSL_CTX_SET_CIPHER_LIST_RESULT = 0;
     expect_any(__wrap_SSL_CTX_set_cipher_list, ctx);
     expect_string(__wrap_SSL_CTX_set_cipher_list, str,
-                  "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:!"
-                  "aNULL:!eNULL@STRENGTH");
+                  "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-"
+                  "GCM-SHA384:!aNULL:!eNULL@STRENGTH");
 }
 
 int SSL_USE_CERTIFICATE_FILE_RESULT = 0;
@@ -310,12 +310,25 @@ void expect_SSL_read(int result, int expected_size, int ssl_error,
     SSL_READ_RESULT = result;
     if (result <= 0)
     {
+        // First SSL_get_error call from exttls_has_read_error_closed
         expect_any(__wrap_SSL_get_error, s);
         expect_value(__wrap_SSL_get_error, ret_code, result);
         SSL_GET_ERROR_RESULT = ssl_error;
-        if (ssl_error != SSL_ERROR_WANT_WRITE &&
-            ssl_error != SSL_ERROR_WANT_READ)
+        if (ssl_error == SSL_ERROR_NONE || ssl_error == SSL_ERROR_ZERO_RETURN)
+        {
+            // exttls_has_read_error_closed matches, calls ERR_error_string_n
             expect_ERR_error_string_n();
+        }
+        else
+        {
+            // exttls_has_read_error_closed returns ST_ERR, falls through to
+            // exttls_has_read_error which calls SSL_get_error again
+            expect_any(__wrap_SSL_get_error, s);
+            expect_value(__wrap_SSL_get_error, ret_code, result);
+            if (ssl_error != SSL_ERROR_WANT_WRITE &&
+                ssl_error != SSL_ERROR_WANT_READ)
+                expect_ERR_error_string_n();
+        }
     }
     else
     {
@@ -407,7 +420,7 @@ int expect_SSL_accept(acceptFailType type)
 }
 
 X509* SSL_GET_PEER_CERTIFICATE_RESULT = NULL;
-X509* __wrap_SSL_get_peer_certificate(const SSL* s)
+X509* __wrap_SSL_get1_peer_certificate(const SSL* s)
 {
     check_expected_ptr(s);
     return SSL_GET_PEER_CERTIFICATE_RESULT;
@@ -416,7 +429,7 @@ X509* __wrap_SSL_get_peer_certificate(const SSL* s)
 int FAKE_X509;
 void expect_SSL_get_peer_certificate(bool success)
 {
-    expect_any(__wrap_SSL_get_peer_certificate, s);
+    expect_any(__wrap_SSL_get1_peer_certificate, s);
     if (success)
     {
         SSL_GET_PEER_CERTIFICATE_RESULT = (X509*)&FAKE_X509;
@@ -442,6 +455,15 @@ void expect_SSL_get_peer_certificate(bool success)
 const SSL_METHOD* __wrap_TLS_server_method(void)
 {
     return NULL;
+}
+
+long __wrap_SSL_CTX_ctrl(SSL_CTX* ctx, int cmd, long larg, void* parg)
+{
+    (void)ctx;
+    (void)cmd;
+    (void)larg;
+    (void)parg;
+    return 1;
 }
 
 X509_NAME* __wrap_X509_get_subject_name(const X509* a)
@@ -803,9 +825,9 @@ void exttls_recv_errors_test(void** state)
     conn.sockfd = 1;
     conn.p_hdlr_data = &fake_ssl;
     expect_SSL_read(0, sz_len, SSL_ERROR_NONE, NULL, 0);
-    assert_int_equal(-1, exttls_recv(&conn, buf, sz_len, &pending));
+    assert_int_equal(0, exttls_recv(&conn, buf, sz_len, &pending));
     expect_SSL_read(0, sz_len, SSL_ERROR_ZERO_RETURN, NULL, 0);
-    assert_int_equal(-1, exttls_recv(&conn, buf, sz_len, &pending));
+    assert_int_equal(0, exttls_recv(&conn, buf, sz_len, &pending));
     expect_SSL_read(-1, sz_len, SSL_ERROR_WANT_WRITE, NULL, 0);
     assert_int_equal(-1, exttls_recv(&conn, buf, sz_len, &pending));
     expect_SSL_read(-1, sz_len, SSL_ERROR_WANT_READ, NULL, 0);

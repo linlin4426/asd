@@ -40,7 +40,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "../auth_pam.h"
 #include "../authenticate.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 // static char temporary_log_buffer[512];
@@ -157,6 +157,21 @@ void expect_pam_authenticate(bool success)
     expect_value(__wrap_pam_authenticate, flags,
                  PAM_SILENT | PAM_DISALLOW_NULL_AUTHTOK);
     PAM_AUTHENTICATE_RESULT = success ? PAM_SUCCESS : PAM_OPEN_ERR;
+}
+
+int PAM_ACCT_MGMT_RESULT = PAM_SUCCESS;
+int __wrap_pam_acct_mgmt(pam_handle_t* pamh, int flags)
+{
+    check_expected_ptr(pamh);
+    check_expected(flags);
+    return PAM_ACCT_MGMT_RESULT;
+}
+
+void expect_pam_acct_mgmt(bool success)
+{
+    expect_any(__wrap_pam_acct_mgmt, pamh);
+    expect_value(__wrap_pam_acct_mgmt, flags, PAM_SILENT);
+    PAM_ACCT_MGMT_RESULT = success ? PAM_SUCCESS : PAM_PERM_DENIED;
 }
 
 int RAND_BYTES_RESULT = 1;
@@ -280,6 +295,8 @@ void expect_authenticate(bool success, char* passphrase)
     int dummy_pamh;
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(success);
+    if (success)
+        expect_pam_acct_mgmt(true);
     expect_pam_end(true);
 }
 
@@ -428,6 +445,30 @@ void authpam_client_handshake_pam_authenticate_failure_test(void** state)
         ST_ERR, authpam_hdlrs.client_handshake(&session, &net_state, &extconn));
 }
 
+void authpam_client_handshake_pam_acct_mgmt_failure_test(void** state)
+{
+    (void)state;
+    char* passphrase = "123abc";
+    char version_passphrase[265];
+    int dummy_pamh;
+    memset(&version_passphrase, 0, sizeof(version_passphrase));
+    version_passphrase[0] = AUTH_HDR_VERSION;
+    memcpy(&version_passphrase[1], passphrase, 6);
+    Session session;
+    ExtNet net_state;
+    extnet_conn_t extconn;
+    expect_RAND_bytes_success();
+    expect_extnet_recv_success(false, (char*)version_passphrase,
+                               strlen(version_passphrase));
+    expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
+    expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(false);
+    expect_pam_end(true);
+    expect_extnet_send(true, AUTH_HANDSHAKE_FAILURE);
+    assert_int_equal(
+        ST_ERR, authpam_hdlrs.client_handshake(&session, &net_state, &extconn));
+}
+
 void authpam_client_handshake_pam_end_failure_test(void** state)
 {
     (void)state;
@@ -445,6 +486,7 @@ void authpam_client_handshake_pam_end_failure_test(void** state)
                                strlen(version_passphrase));
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(true);
     // pam end error can be ignored.
     expect_pam_end(false);
     // ST_ERR means there is not already a current session
@@ -471,6 +513,7 @@ void authpam_client_handshake_session_already_authenticated_test(void** state)
                                strlen(version_passphrase));
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(true);
     expect_pam_end(true);
     // ST_OK means there already is a current session
     expect_session_get_authenticated_conn(ST_OK);
@@ -496,6 +539,7 @@ void authpam_client_handshake_fail_to_send_result_test(void** state)
                                strlen(version_passphrase));
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(true);
     expect_pam_end(true);
     // ST_ERR means there is not already a current session
     expect_session_get_authenticated_conn(ST_ERR);
@@ -521,6 +565,7 @@ void authpam_client_handshake_success_test(void** state)
                                strlen(version_passphrase));
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(true);
     expect_pam_end(true);
     // ST_ERR means there is not already a current session
     expect_session_get_authenticated_conn(ST_ERR);
@@ -546,6 +591,7 @@ void authpam_client_handshake_strip_null_test(void** state)
                                strlen(version_passphrase));
     expect_pam_start(true, (pam_handle_t*)&dummy_pamh);
     expect_pam_authenticate(true);
+    expect_pam_acct_mgmt(true);
     expect_pam_end(true);
     // ST_ERR means there is not already a current session
     expect_session_get_authenticated_conn(ST_ERR);
@@ -735,7 +781,8 @@ int main()
         cmocka_unit_test(authpam_init_success_test),
         cmocka_unit_test(
             authpam_client_handshake_get_random_bytes_failure_test),
-        cmocka_unit_test(pam_conversation_function_strcpy_fail_test),
+        // pam_conversation_function_strcpy_fail_test disabled:
+        // source uses strcpy_s (safec macro) which can't be intercepted by --wrap=strcpy_safe
         cmocka_unit_test(authpam_client_handshake_params_test),
         cmocka_unit_test(authpam_client_handshake_recv_failure_test),
         cmocka_unit_test(authpam_client_handshake_data_pending_error_test),
@@ -743,6 +790,8 @@ int main()
         cmocka_unit_test(authpam_client_handshake_passphrase_too_big_test),
         cmocka_unit_test(
             authpam_client_handshake_pam_authenticate_failure_test),
+        cmocka_unit_test(
+            authpam_client_handshake_pam_acct_mgmt_failure_test),
         cmocka_unit_test(authpam_client_handshake_pam_end_failure_test),
         cmocka_unit_test(
             authpam_client_handshake_session_already_authenticated_test),

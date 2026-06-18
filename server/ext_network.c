@@ -148,6 +148,8 @@ STATUS extnet_open_external_socket(ExtNet* state, const char* cp_bind_if,
             ASD_log(ASD_LogLevel_Error, ASD_LogStream_Network,
                     ASD_LogOption_None,
                     "setsockopt(TCP_NODELAY) failed errno: %d", errno);
+            close(*pfd_sock);
+            *pfd_sock = -1;
             result = ST_ERR;
         }
     }
@@ -162,6 +164,8 @@ STATUS extnet_open_external_socket(ExtNet* state, const char* cp_bind_if,
             ASD_log(ASD_LogLevel_Error, ASD_LogStream_Network,
                     ASD_LogOption_None,
                     "setsockopt(SO_REUSEADDR) failed errno: %d", errno);
+            close(*pfd_sock);
+            *pfd_sock = -1;
             result = ST_ERR;
         }
     }
@@ -178,6 +182,8 @@ STATUS extnet_open_external_socket(ExtNet* state, const char* cp_bind_if,
                         ASD_LogOption_None,
                         "setsockopt(SO_BINDTODEVICE '%s') failed; errno: %d",
                         cp_bind_if, errno);
+                close(*pfd_sock);
+                *pfd_sock = -1;
                 result = ST_ERR;
             }
         }

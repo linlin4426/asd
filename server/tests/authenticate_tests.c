@@ -38,7 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <syslog.h>
 
 #include "../authenticate.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 bool fake_authnone_init_was_called = false;

@@ -34,8 +34,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "logging.h"
 
-static STATUS copy_i2c_to_asd(asd_i2c_msg* asd, struct i2c_msg* i2c);
-static STATUS copy_asd_to_i2c(const asd_i2c_msg* asd, struct i2c_msg* i2c);
+#ifndef UNIT_TEST_MAIN
+static
+#endif
+STATUS copy_i2c_to_asd(asd_i2c_msg* asd, struct i2c_msg* i2c);
+#ifndef UNIT_TEST_MAIN
+static
+#endif
+STATUS copy_asd_to_i2c(const asd_i2c_msg* asd, struct i2c_msg* i2c);
 
 I2C_Msg_Builder* I2CMsgBuilder()
 {
@@ -92,7 +98,7 @@ STATUS i2c_msg_deinitialize(I2C_Msg_Builder* state)
 STATUS i2c_msg_add(I2C_Msg_Builder* state, asd_i2c_msg* msg)
 {
     STATUS status = ST_ERR;
-    if (state != NULL && msg != NULL)
+    if (state != NULL && msg != NULL && state->msg_set != NULL)
     {
         struct i2c_rdwr_ioctl_data* ioctl_data = state->msg_set;
         if (ioctl_data->nmsgs == 0)
@@ -101,9 +107,14 @@ STATUS i2c_msg_add(I2C_Msg_Builder* state, asd_i2c_msg* msg)
         }
         else
         {
-            ioctl_data->msgs = (struct i2c_msg*)realloc(
+            struct i2c_msg* tmp = (struct i2c_msg*)realloc(
                 ioctl_data->msgs,
                 (ioctl_data->nmsgs + 1) * sizeof(struct i2c_msg));
+            if (tmp == NULL)
+            {
+                return ST_ERR;
+            }
+            ioctl_data->msgs = tmp;
         }
         if (ioctl_data->msgs)
         {
@@ -147,7 +158,7 @@ STATUS i2c_msg_get_asd_i2c_msg(I2C_Msg_Builder* state, uint32_t index,
 STATUS i2c_msg_reset(I2C_Msg_Builder* state)
 {
     STATUS status = ST_ERR;
-    if (state != NULL)
+    if (state != NULL && state->msg_set != NULL)
     {
         struct i2c_rdwr_ioctl_data* ioctl_data = state->msg_set;
         for (int i = 0; i < ioctl_data->nmsgs; i++)
@@ -170,7 +181,10 @@ STATUS i2c_msg_reset(I2C_Msg_Builder* state)
     return status;
 }
 
-static STATUS copy_asd_to_i2c(const asd_i2c_msg* asd, struct i2c_msg* i2c)
+#ifndef UNIT_TEST_MAIN
+static
+#endif
+STATUS copy_asd_to_i2c(const asd_i2c_msg* asd, struct i2c_msg* i2c)
 {
     STATUS status = ST_ERR;
     if (i2c != NULL && asd != NULL)
@@ -193,7 +207,10 @@ static STATUS copy_asd_to_i2c(const asd_i2c_msg* asd, struct i2c_msg* i2c)
     return status;
 }
 
-static STATUS copy_i2c_to_asd(asd_i2c_msg* asd, struct i2c_msg* i2c)
+#ifndef UNIT_TEST_MAIN
+static
+#endif
+STATUS copy_i2c_to_asd(asd_i2c_msg* asd, struct i2c_msg* i2c)
 {
     STATUS status = ST_ERR;
 
@@ -202,7 +219,7 @@ static STATUS copy_i2c_to_asd(asd_i2c_msg* asd, struct i2c_msg* i2c)
         asd->address = (uint8_t)i2c->addr;
         asd->length = (uint8_t)i2c->len;
         asd->read = ((i2c->flags & I2C_M_RD) == I2C_M_RD);
-        for (int i = 0; i < i2c->len; i++)
+        for (int i = 0; i < i2c->len && i < ASD_I2C_BUFFER_LEN; i++)
         {
             asd->buffer[i] = i2c->buf[i];
         }

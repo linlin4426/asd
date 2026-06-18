@@ -55,9 +55,11 @@ bool should_remote_log(ASD_LogLevel, ASD_LogStream);
 STATUS write_cfg(writeCfg cmd, struct packet_data* packet);
 STATUS asd_write_set_active_chain_event(uint8_t scan_chain);
 bus_config_type bus_type(uint8_t bus);
-STATUS do_bus_select_command(struct packet_data* packet);
+STATUS do_bus_select_command(struct packet_data* packet, struct asd_message* msg);
 STATUS do_set_sclk_command(struct packet_data* packet);
 STATUS do_read_write(void* msg_set);
+static void check_shift_state_bundle_start(struct asd_message* s_message,
+                                           int size);
 static ASD_MSG* instance = NULL;
 static uint8_t get_supported_jtag_chains(void);
 
@@ -83,10 +85,10 @@ STATUS read_openbmc_version()
             char* ptr = strstr(line, OPENBMC_V);
             if (ptr != NULL)
             {
-                line = line + sizeof(OPENBMC_V);
+                char* version_start = line + sizeof(OPENBMC_V);
                 msg_state.bmc_version_size = read - sizeof(OPENBMC_V) - 1;
                 if (memcpy_s(msg_state.bmc_version, sizeof(msg_state.bmc_version),
-                             line, msg_state.bmc_version_size) == 1)
+                             version_start, msg_state.bmc_version_size) != 0)
                 {
                     ASD_log(ASD_LogLevel_Debug, ASD_LogStream_SDK,
                             ASD_LogOption_None, "memcpy_s failed");
@@ -115,6 +117,7 @@ STATUS read_openbmc_version()
                 }
             }
         }
+        free(line);
         fclose(fp);
     }
     return result;
@@ -385,6 +388,7 @@ STATUS asd_msg_on_msg_recv(void)
                     "memcpy_s: msg header to out msg header copy buffer "
                     "failed.");
             result = ST_ERR;
+            return result;
         }
         // The plugin stores the command in the cmd_stat parameter.
         // For the response, the plugin expects the same value in the
@@ -444,6 +448,14 @@ STATUS asd_msg_on_msg_recv(void)
                 break;
             }
             case SUPPORTED_REMOTE_PROBES_CMD:
+                if (msg_state.vprobe_handler == NULL)
+                {
+                    result = ST_ERR;
+                    ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                            ASD_LogOption_None,
+                            "vprobe_handler is NULL");
+                    break;
+                }
                 if (!msg_state.vprobe_handler->initialized)
                 {
                     if (vProbe_initialize(msg_state.vprobe_handler) != ST_OK)
@@ -462,6 +474,10 @@ STATUS asd_msg_on_msg_recv(void)
                 msg_state.out_msg.header.size_msb = 0;
                 break;
             case REMOTE_PROBES_CONFIG_CMD:
+                if (msg_state.vprobe_handler == NULL)
+                {
+                    break;
+                }
                 if (msg_state.vprobe_handler->remoteConfigs > 0)
                 {
                     uint16_t config_size = 0;
@@ -694,14 +710,10 @@ STATUS asd_msg_on_msg_recv(void)
                 ASD_log(ASD_LogLevel_Trace, ASD_LogStream_Network,
                         ASD_LogOption_None, "LOOPBACK MODE.");
                 uint16_t delay = (msg->buffer[0]);
-                uint16_t size =
-                    (msg->header.size_lsb) + (msg->header.size_msb << 8);
+                int msg_sz = get_message_size(msg);
+                uint16_t size = (msg_sz > 0) ? (uint16_t)msg_sz : 0;
                 uint32_t crc_data_calc = 0;
                 uint32_t read_crc = 0;
-                if (size > MAX_DATA_SIZE)
-                {
-                    size = MAX_DATA_SIZE;
-                }
                 ASD_log(ASD_LogLevel_Trace, ASD_LogStream_Network,
                         ASD_LogOption_None, "size: %d, delay: %d.",
                         size, delay);
@@ -791,7 +803,6 @@ STATUS asd_msg_on_msg_recv(void)
             {
                 if (spp_initialize(msg_state.spp_handler) != ST_OK)
                 {
-                    result = ST_ERR;
                     ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
                             ASD_LogOption_None,
                             "Failed to initialize the spp handler");
@@ -850,6 +861,7 @@ void send_error_message(struct asd_message* input_message,
     {
         ASD_log(ASD_LogLevel_Error, ASD_LogStream_JTAG, ASD_LogOption_None,
                 "memcpy_s: input header to error header copy  failed.");
+        return;
     }
     error_message.header.type = 1;
     error_message.header.size_lsb = 0;
@@ -999,10 +1011,8 @@ void process_message()
             {
                 ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
                         ASD_LogOption_None,
-                        "Failed to process SPP message, do not FW error");
-                // TODO: For now do not report all errors since some timeouts are
-                //       expected during power flows.
-                //send_error_message( msg, ASD_FAILURE_PROCESS_SPP_MSG);
+                        "Failed to process SPP message");
+                send_error_message( msg, ASD_FAILURE_PROCESS_SPP_MSG);
                 return;
             }
         }
@@ -1097,6 +1107,8 @@ STATUS process_jtag_message(struct asd_message* s_message)
     packet.next_data = s_message->buffer;
     packet.used = 0;
     packet.total = (unsigned int)size;
+
+    check_shift_state_bundle_start(s_message, size);
 
     while (packet.used < packet.total)
     {
@@ -1416,6 +1428,14 @@ STATUS process_jtag_message(struct asd_message* s_message)
         }
         else if (cmd >= TAP_STATE_MIN && cmd <= TAP_STATE_MAX)
         {
+            if (msg_state.jtag_handler->active_chain == NULL)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                        ASD_LogOption_None,
+                        "No active scan chain selected for TAP state command");
+                status = ST_ERR;
+                break;
+            }
             status = JTAG_set_tap_state(
                 msg_state.jtag_handler,
                 (enum jtag_states)(cmd & (uint8_t)TAP_STATE_MASK));
@@ -1431,6 +1451,15 @@ STATUS process_jtag_message(struct asd_message* s_message)
         {
             uint8_t num_of_bits = 0;
             uint8_t num_of_bytes = 0;
+
+            if (msg_state.jtag_handler->active_chain == NULL)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                        ASD_LogOption_None,
+                        "No active scan chain selected for scan command");
+                status = ST_ERR;
+                break;
+            }
 
             get_scan_length(cmd, &num_of_bits, &num_of_bytes);
             data_ptr = get_packet_data(&packet, num_of_bytes);
@@ -1465,6 +1494,15 @@ STATUS process_jtag_message(struct asd_message* s_message)
         {
             uint8_t num_of_bits = 0;
             uint8_t num_of_bytes = 0;
+
+            if (msg_state.jtag_handler->active_chain == NULL)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                        ASD_LogOption_None,
+                        "No active scan chain selected for scan command");
+                status = ST_ERR;
+                break;
+            }
 
             get_scan_length(cmd, &num_of_bits, &num_of_bytes);
             if (response_cnt + sizeof(char) + num_of_bytes > MAX_DATA_SIZE)
@@ -1501,6 +1539,16 @@ STATUS process_jtag_message(struct asd_message* s_message)
         {
             uint8_t num_of_bits = 0;
             uint8_t num_of_bytes = 0;
+
+            if (msg_state.jtag_handler->active_chain == NULL)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                        ASD_LogOption_None,
+                        "No active scan chain selected for scan command");
+                status = ST_ERR;
+                break;
+            }
+
             get_scan_length(cmd, &num_of_bits, &num_of_bytes);
             if (response_cnt + sizeof(char) + num_of_bytes > MAX_DATA_SIZE)
             {
@@ -1614,6 +1662,14 @@ STATUS process_spp_message(struct asd_message* s_message)
 
     while (packet.used < packet.total)
     {
+        if (response_cnt >= MAX_DATA_SIZE)
+        {
+            ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP, ASD_LogOption_None,
+                    "SPP response buffer full, aborting");
+            status = ST_ERR;
+            break;
+        }
+
         data_ptr = get_packet_data(&packet, 1);
         if (data_ptr == NULL)
         {
@@ -1629,9 +1685,8 @@ STATUS process_spp_message(struct asd_message* s_message)
 
         if (cmd <= SPP_CFG_MAX)
         {
-            // For future enhacements
-            ASD_log(ASD_LogLevel_Debug, ASD_LogStream_SPP, ASD_LogOption_None,
-                    "SPP config");
+            ASD_log(ASD_LogLevel_Warning, ASD_LogStream_SPP, ASD_LogOption_None,
+                    "Unsupported SPP config command 0x%02x", (int)cmd);
         }
         else if (cmd == SPP_SEND)
         {
@@ -1652,6 +1707,15 @@ STATUS process_spp_message(struct asd_message* s_message)
             address = *data_ptr;
 
             if (msg_state.spp_handler->bulk_mode) {
+                if (address >= MAX_SPP_BUS_DEVICES)
+                {
+                    ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                            ASD_LogOption_None,
+                            "bulk_address %d out of range at assignment",
+                            address);
+                    status = ST_ERR;
+                    break;
+                }
                 bulk_address = address;
             }
 
@@ -1793,7 +1857,7 @@ STATUS process_spp_message(struct asd_message* s_message)
                 msg_state.out_msg.buffer[response_cnt++] = address;
                 msg_state.out_msg.buffer[response_cnt++] = 0;
                 msg_state.out_msg.buffer[response_cnt++] = 0;
-                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                ASD_log(ASD_LogLevel_Debug, ASD_LogStream_SPP,
                         ASD_LogOption_None,
                         "Failed to process SPP Receive, do not send error");
                 // TODO: For now do not report all errors since some are expected
@@ -1823,6 +1887,15 @@ STATUS process_spp_message(struct asd_message* s_message)
             address = *data_ptr;
 
             if (msg_state.spp_handler->bulk_mode) {
+                if (address >= MAX_SPP_BUS_DEVICES)
+                {
+                    ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                            ASD_LogOption_None,
+                            "bulk_address %d out of range at assignment",
+                            address);
+                    status = ST_ERR;
+                    break;
+                }
                 bulk_address = address;
             }
 
@@ -1935,6 +2008,15 @@ STATUS process_spp_message(struct asd_message* s_message)
             address = *data_ptr;
 
             if (msg_state.spp_handler->bulk_mode) {
+                if (address >= MAX_SPP_BUS_DEVICES)
+                {
+                    ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                            ASD_LogOption_None,
+                            "bulk_address %d out of range at assignment",
+                            address);
+                    status = ST_ERR;
+                    break;
+                }
                 bulk_address = address;
             }
 
@@ -2020,6 +2102,16 @@ STATUS process_spp_message(struct asd_message* s_message)
                         ASD_LogOption_None,
                         "spp_send_receive_cmd handshake not ready");
                 asd_msg_check_spp_ibi(address);
+            }
+
+            if (response_cnt + SPP_SEND_RECEIVE_CMD_COMMAND_SIZE +
+                num_of_read_bytes > MAX_DATA_SIZE)
+            {
+                ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                        ASD_LogOption_None,
+                        "SPP send_receive response would overflow buffer");
+                status = ST_ERR;
+                break;
             }
 
             status = spp_send_receive_cmd(msg_state.spp_handler, spp_command,
@@ -2196,6 +2288,13 @@ STATUS process_spp_message(struct asd_message* s_message)
     // For bulk operations, halt further response processing as the response
     // has already been sent.
     if (msg_state.spp_handler->bulk_mode) {
+        if (bulk_address >= MAX_SPP_BUS_DEVICES) {
+            ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP,
+                    ASD_LogOption_None,
+                    "bulk_address %d out of range", bulk_address);
+            msg_state.spp_handler->bulk_mode = false;
+            return ST_ERR;
+        }
         // Check if we have processed the last send in bulk
         if (msg_state.spp_handler->threshold_status[bulk_address]) {
             ASD_log(ASD_LogLevel_Info, ASD_LogStream_SPP,
@@ -2441,6 +2540,38 @@ STATUS write_cfg(const writeCfg cmd, struct packet_data* packet)
     return status;
 }
 
+// Check if the previous bundle left us in a shift state.
+// The plugin may split consecutive shifts of the same kind across
+// bundles, which is safe as long as the next bundle continues with
+// a scan command.  If it does not, log an error.
+static void check_shift_state_bundle_start(struct asd_message* s_message,
+                                           int size)
+{
+    enum jtag_states current_state;
+    if (JTAG_get_tap_state(msg_state.jtag_handler, &current_state) != ST_OK)
+        return;
+
+    if (current_state != jtag_shf_dr && current_state != jtag_shf_ir)
+        return;
+
+    if (size <= 0)
+        return;
+
+    uint8_t first_cmd = s_message->buffer[0];
+    if (!(first_cmd >= WRITE_SCAN_MIN && first_cmd <= WRITE_SCAN_MAX) &&
+        !(first_cmd >= READ_SCAN_MIN && first_cmd <= READ_SCAN_MAX) &&
+        !(first_cmd >= READ_WRITE_SCAN_MIN && first_cmd <= READ_WRITE_SCAN_MAX))
+    {
+        ASD_log(ASD_LogLevel_Error, ASD_LogStream_JTAG,
+                ASD_LogOption_None,
+                "Previous bundle ended in %s but next bundle "
+                "does not start with a scan command "
+                "(first_cmd=0x%02x)",
+                current_state == jtag_shf_dr ? "ShiftDR" : "ShiftIR",
+                first_cmd);
+    }
+}
+
 static void get_scan_length(const unsigned char cmd, uint8_t* num_of_bits,
                             uint8_t* num_of_bytes)
 {
@@ -2493,9 +2624,11 @@ STATUS determine_shift_end_state(ScanType scan_type,
                     while (packet->used < packet->total)
                     {
                         next_cmd2_ptr = get_packet_data(packet, 1);
-                        next_cmd2_counter++;
                         if (next_cmd2_ptr == NULL)
+                        {
                             break;
+                        }
+                        next_cmd2_counter++;
                         if (*next_cmd2_ptr >= TAP_STATE_MIN &&
                             *next_cmd2_ptr <= TAP_STATE_MAX)
                         {
@@ -2516,6 +2649,10 @@ STATUS determine_shift_end_state(ScanType scan_type,
                                     "Next2 is 1 byte length: 0x%x",
                                     *next_cmd2_ptr);
                             next_cmd2_ptr = get_packet_data(packet, 1);
+                            if (next_cmd2_ptr == NULL)
+                            {
+                                break;
+                            }
                             next_cmd2_counter++;
                             continue;
                         }
@@ -2527,6 +2664,10 @@ STATUS determine_shift_end_state(ScanType scan_type,
                                     "Next2 is 2 byte length: 0x%x",
                                     *next_cmd2_ptr);
                             next_cmd2_ptr = get_packet_data(packet, 2);
+                            if (next_cmd2_ptr == NULL)
+                            {
+                                break;
+                            }
                             next_cmd2_counter = next_cmd2_counter + 2;
                             continue;
                         }
@@ -2538,6 +2679,23 @@ STATUS determine_shift_end_state(ScanType scan_type,
                                     *next_cmd2_ptr);
                             break;
                         }
+                    }
+
+                    // Detect unexpected packet split: in HW2 mode, if we
+                    // consumed all remaining packet bytes without finding
+                    // a second TAP_STATE, the packet was split between
+                    // Ex1DR/Ex1IR and the next state that
+                    // determine_shift_end_state needs.
+                    if (next_cmd2_ptr == NULL ||
+                        !(*next_cmd2_ptr >= TAP_STATE_MIN &&
+                          *next_cmd2_ptr <= TAP_STATE_MAX))
+                    {
+                        ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK,
+                                ASD_LogOption_None,
+                                "Unexpected HW2 mode packet split: "
+                                "no second TAP_STATE found after Ex1\r\n"
+                                "next_cmd=0x%02x, pkt_used=%u, pkt_total=%u",
+                                *next_cmd_ptr, packet->used, packet->total);
                     }
                 }
 
@@ -2689,6 +2847,10 @@ STATUS asd_msg_read(void)
             if (size > 0)
             {
                 result = ST_OK;
+                if (size > num_to_read)
+                {
+                    size = num_to_read;
+                }
                 num_to_read -= size;
                 if (num_to_read == 0)
                 {
@@ -2758,6 +2920,10 @@ STATUS asd_msg_read(void)
             if (size > 0)
             {
                 result = ST_OK;
+                if (size > num_to_read)
+                {
+                    size = num_to_read;
+                }
                 num_to_read -= size;
                 if (num_to_read == 0)
                 {
@@ -2816,6 +2982,13 @@ uint8_t lsb_from_msg_size(u_int32_t response_cnt)
 
 uint8_t msb_from_msg_size(u_int32_t response_cnt)
 {
+    if (response_cnt > MAX_DATA_SIZE)
+    {
+        ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK, ASD_LogOption_None,
+                "msb_from_msg_size: response_cnt %u exceeds MAX_DATA_SIZE",
+                response_cnt);
+        response_cnt = MAX_DATA_SIZE;
+    }
     return (uint8_t)((response_cnt >> (uint8_t)8) & (uint8_t)0x1F);
 }
 
@@ -2966,14 +3139,22 @@ STATUS send_bpk_event(ASD_EVENT event, ASD_EVENT_DATA event_data)
         }
     }
 
-    message.header.size_lsb = event_data.size + 2;
-    message.header.size_msb = 0;
+    {
+        uint16_t total_size = (uint16_t)(event_data.size + 2);
+        message.header.size_lsb = lsb_from_msg_size(total_size);
+        message.header.size_msb = msb_from_msg_size(total_size);
+    }
     message.header.type = JTAG_TYPE;
     message.header.tag = BROADCAST_MESSAGE_ORIGIN_ID;
     message.header.origin_id = BROADCAST_MESSAGE_ORIGIN_ID;
     message.buffer[0] = (event & 0xFF);  // ASD_EVENT_BPK
     message.buffer[1] = (uint8_t)(event_data.addr & 0xFF);  // i3c_debug device id
 
+    if (event_data.size > MAX_DATA_SIZE - 2) {
+        ASD_log(ASD_LogLevel_Error, ASD_LogStream_SPP, ASD_LogOption_None,
+                "IBI event_data.size %zu exceeds buffer", event_data.size);
+        return ST_ERR;
+    }
     for (size_t i = 0; i < event_data.size; i++) {
         message.buffer[i+2] = event_data.buffer[i];
     }
@@ -3223,6 +3404,10 @@ STATUS asd_write_set_active_chain_event(uint8_t scan_chain)
                 "target_jtag_chain_select failed, %d", result);
         return result;
     }
+
+    // Delay to allow TCK mux to settle after switching
+    target_chain_select_delay(msg_state.target_handler);
+
     result = JTAG_set_active_chain(msg_state.jtag_handler, (scanChain)scan_chain);
     if (result != ST_OK)
     {
@@ -3242,7 +3427,7 @@ bus_config_type bus_type(uint8_t bus)
     return BUS_CONFIG_NOT_ALLOWED;
 }
 
-STATUS do_bus_select_command(struct packet_data* packet)
+STATUS do_bus_select_command(struct packet_data* packet, struct asd_message* msg)
 {
     STATUS status = ST_OK;
     uint8_t* data_ptr = get_packet_data(packet, 1);
@@ -3271,14 +3456,14 @@ STATUS do_bus_select_command(struct packet_data* packet)
         {
             ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK, ASD_LogOption_None,
                     "Failed to remove dev lock ");
-            send_error_message( (struct asd_message *)&packet, ASD_FAILURE_REMOVE_I2C_LOCK);
+            send_error_message(msg, ASD_FAILURE_REMOVE_I2C_LOCK);
         }
         status = dev_flock(bus, LOCK_EX);
         if (status != ST_OK)
         {
             ASD_log(ASD_LogLevel_Error, ASD_LogStream_SDK, ASD_LogOption_None,
                     "Failed to remove dev lock");
-            send_error_message( (struct asd_message *)&packet, ASD_FAILURE_PROCESS_I2C_LOCK);
+            send_error_message(msg, ASD_FAILURE_PROCESS_I2C_LOCK);
             return ST_ERR;
         }
     }
@@ -3733,7 +3918,7 @@ STATUS process_i2c_messages(struct asd_message* in_msg)
                     }
                     if (cmd == I2C_WRITE_CFG_BUS_SELECT)
                     {
-                        status = do_bus_select_command(&packet);
+                        status = do_bus_select_command(&packet, in_msg);
                         if (status != ST_OK)
                         {
                             msg_state.out_msg.header.size_lsb =

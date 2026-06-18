@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "logging.h"
 
 #define JTAG_CLOCK_CYCLE_MILLISECONDS 1000
+#define LOG2TIME_SHIFT_MAX 30 // Max safe left-shift for signed int (1 << 31 is UB)
 #define GPIOD_CONSUMER_LABEL "ASD"
 #define GPIOD_DEV_ROOT_FOLDER "/dev/"
 #define GPIOD_DEV_ROOT_FOLDER_STRLEN strnlen_s(GPIOD_DEV_ROOT_FOLDER, 6)
@@ -272,6 +273,7 @@ Target_Control_Handle* TargetHandler()
     state->spp_handler = NULL;
 
     state->initialized = false;
+    state->chain_select_delay_us = 0;
 
     explicit_bzero(&state->gpios, sizeof(state->gpios));
 
@@ -570,6 +572,15 @@ STATUS platform_init(Target_Control_Handle* state)
                                (char*)&state->gpios, sizeof(state->gpios),
                                "JSON");
 #endif
+                // Read chain select delay from entity manager
+                uint32_t delay_val = 0;
+                if (dbus_get_chain_select_delay(dbus, &delay_val) == ST_OK)
+                {
+                    state->chain_select_delay_us = delay_val;
+                    ASD_log(ASD_LogLevel_Info, stream, option,
+                            "ChainSelectDelayUs set to %u",
+                            state->chain_select_delay_us);
+                }
             }
             dbus_deinitialize(dbus);
         }
@@ -1204,6 +1215,11 @@ STATUS target_event(Target_Control_Handle* state, struct pollfd poll_fd,
                 result = target_clear_gpio_event(state, state->gpios[i]);
                 if (result != ST_OK)
                     break;
+                if (state->gpios[i].handler == NULL)
+                {
+                    result = ST_ERR;
+                    break;
+                }
                 result = state->gpios[i].handler(state, event);
                 break;
             }
@@ -1409,7 +1425,7 @@ STATUS target_write(Target_Control_Handle* state, const Pin pin,
                     const bool assert)
 {
     STATUS result = ST_OK;
-    Target_Control_GPIO gpio;
+    Target_Control_GPIO gpio = {0};
     int value;
 
     if (state == NULL || !state->initialized)
@@ -1637,7 +1653,9 @@ STATUS target_wait_PRDY(Target_Control_Handle* state, const uint8_t log2time)
     // The timeout for commands that wait for a PRDY pulse is defined to be in
     // uSec, we need to convert to mSec, so we divide by 1000. For
     // values less than 1 ms that get rounded to 0 we need to wait 1ms.
-    timeout_ms = (1 << log2time) / JTAG_CLOCK_CYCLE_MILLISECONDS;
+    // Clamp log2time to LOG2TIME_SHIFT_MAX to prevent undefined behavior
+    // from left-shifting a signed int past bit 30.
+    timeout_ms = (1 << (log2time > LOG2TIME_SHIFT_MAX ? LOG2TIME_SHIFT_MAX : log2time)) / JTAG_CLOCK_CYCLE_MILLISECONDS;
     if (timeout_ms <= 0)
     {
         timeout_ms = 1;
@@ -1827,6 +1845,12 @@ STATUS target_get_fds(Target_Control_Handle* state, target_fdarr_t* fds,
         {
             for(i = 0; i<count; i++)
             {
+                if (index >= NUM_GPIOS + NUM_DBUS_FDS)
+                {
+                    ASD_log(ASD_LogLevel_Error, stream, option,
+                            "target_get_fds: fd array full, index=%d", index);
+                    break;
+                }
                 (*fds)[index].fd = state->spp_handler->spp_dev_handlers[i];
                 (*fds)[index].events = POLLIN;
                 index++;
@@ -1977,4 +2001,10 @@ STATUS target_get_i2c_i3c_config(bus_options* busopt)
     }
 #endif
     return result;
+}
+
+void target_chain_select_delay(Target_Control_Handle* state)
+{
+    if (state != NULL && state->chain_select_delay_us > 0)
+        usleep(state->chain_select_delay_us);
 }

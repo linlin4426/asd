@@ -37,7 +37,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h>
 
 #include "../i2c_msg_builder.h"
-#include "../logging.h"
+#include "logging.h"
 #include "cmocka.h"
 
 // static char temporary_log_buffer[512];
@@ -69,6 +69,19 @@ void* __wrap_malloc(size_t size)
         return NULL;
     }
     return __real_malloc(size);
+}
+
+static bool realloc_fail = false;
+void* __real_realloc(void* ptr, size_t size);
+void* __wrap_realloc(void* ptr, size_t size)
+{
+    if (realloc_fail)
+    {
+        realloc_fail = false;
+        check_expected(size);
+        return NULL;
+    }
+    return __real_realloc(ptr, size);
 }
 
 static int setup(void** state)
@@ -318,41 +331,28 @@ void i2c_msg_reset_test()
     i2c_msg_deinitialize(&handler);
 }
 
-void copy_asd_to_i2c_tests(void** state)
+
+
+void i2c_msg_add_null_msg_set_returns_error_test()
 {
-    // NULL and invalid tests
-    asd_i2c_msg* asd = NULL;
-    struct i2c_msg* i2c = NULL;
-    assert_int_equal(copy_asd_to_i2c(asd, i2c), ST_ERR);
-
-    // allocate objects and get test message
-    asd = malloc(sizeof(asd_i2c_msg));
-    i2c = malloc(sizeof(struct i2c_msg));
-    getTestMsg(1, asd);
-
-    // positive test cases //
-    assert_int_equal(copy_asd_to_i2c(asd, i2c), ST_OK);
+    I2C_Msg_Builder handler;
+    handler.msg_set = NULL;
+    asd_i2c_msg msg;
+    getTestMsg(1, &msg);
+    assert_int_equal(i2c_msg_add(&handler, &msg), ST_ERR);
 }
 
-void copy_i2c_to_asd_tests(void** state)
+void i2c_msg_add_realloc_fail_returns_error_test(void** state)
 {
-    // NULL and invalid tests
-    asd_i2c_msg* asd = NULL;
-    struct i2c_msg* i2c = NULL;
-    assert_int_equal(copy_i2c_to_asd(asd, i2c), ST_ERR);
-
-    // allocate objects and get test message
-    asd = malloc(sizeof(asd_i2c_msg));
-    i2c = malloc(sizeof(struct i2c_msg));
-    uint8_t buff[] = {0x0, 0x01};
-    getTestMsg(1, asd);
-
-    // positive test cases //
-    i2c->addr = 1;
-    i2c->flags = I2C_M_RD;
-    i2c->buf = buff;
-    i2c->len = 1;
-    assert_int_equal(copy_i2c_to_asd(asd, i2c), ST_OK);
+    I2C_Msg_Builder* handler = *state;
+    asd_i2c_msg msg;
+    getTestMsg(1, &msg);
+    // Add first message (uses malloc path)
+    assert_int_equal(i2c_msg_add(handler, &msg), ST_OK);
+    // Second message uses realloc path - make it fail
+    realloc_fail = true;
+    expect_any(__wrap_realloc, size);
+    assert_int_equal(i2c_msg_add(handler, &msg), ST_ERR);
 }
 
 int main()
@@ -385,8 +385,9 @@ int main()
             i2c_msg_get_asd_i2c_msg_invalid_index_test, setup, teardown),
         cmocka_unit_test(i2c_msg_reset_null_state_returns_error_test),
         cmocka_unit_test(i2c_msg_reset_test),
-        cmocka_unit_test(copy_asd_to_i2c_tests),
-        cmocka_unit_test(copy_i2c_to_asd_tests),
+        cmocka_unit_test(i2c_msg_add_null_msg_set_returns_error_test),
+        cmocka_unit_test_setup_teardown(
+            i2c_msg_add_realloc_fail_returns_error_test, setup, teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
